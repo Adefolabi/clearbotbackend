@@ -1,0 +1,14 @@
+# fly.toml app configuration file for clearbotbackend
+
+app = 'clearbotbackend'
+primary_region = 'ams' # Amsterdam (or any region you prefer, e.g., 'mia', 'lhr', 'sin')
+
+[http_service]
+  internal_port = 4000
+  force_https = true
+  auto_rollback = true
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '1gb' # scaled to 1GB to prevent Playwright Chromium memory crashes!
+  cpus = 1
