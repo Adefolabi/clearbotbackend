@@ -1,4 +1,4 @@
-# fly.toml app configuration file for clearbotbackend
+# fly.toml app configuration file for clearbotbackend - deployment trigger
 
 app = 'clearbotbackend'
 primary_region = 'ams' # Amsterdam (or any region you prefer, e.g., 'mia', 'lhr', 'sin')
