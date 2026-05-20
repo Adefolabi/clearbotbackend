@@ -18,6 +18,7 @@ const PORT = process.env.PORT || 4000;
 // We explicitly allow the production frontend origin and localhost for development.
 const allowedOrigins = [
   process.env.FRONTEND_URL,
+  'https://clearbot-frontend-ctgk3tbb7-gaffer.vercel.app',
   'http://localhost:3000',
   'http://127.0.0.1:3000',
 ].filter(Boolean); // remove undefined if FRONTEND_URL is not set
