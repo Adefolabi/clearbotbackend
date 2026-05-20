@@ -1,0 +1,5 @@
+==> Verifying app config
+Validating /home/runner/work/clearbotbackend/clearbotbackend/fly.toml
+[32m✓[0m Configuration is valid
+--> Verified app config
+Error: app not found (Request ID: 01KS1WC6WH459K5Q3KJF33MEC7-iad) (Trace ID: 9c8e87cbadb1728a255dca42a9931e75)
