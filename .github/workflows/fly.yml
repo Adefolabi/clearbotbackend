@@ -9,6 +9,7 @@ jobs:
   deploy:
     name: Deploy App to Fly.io
     runs-on: ubuntu-latest
+    permissions: write-all
     concurrency: deploy-group
     steps:
       - name: Checkout Code
@@ -18,11 +19,22 @@ jobs:
         uses: superfly/flyctl-actions/setup-flyctl@master
 
       - name: Create Fly App if not exists
-        run: flyctl apps create clearbotbackend-adefolabi || true
+        run: |
+          flyctl apps create clearbotbackend-adefolabi > create-log.txt 2>&1 || true
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
       - name: Deploy to Fly.io
-        run: flyctl deploy --remote-only
+        run: |
+          flyctl deploy --remote-only > deploy-log.txt 2>&1
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Upload Logs on Failure
+        if: failure()
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add create-log.txt deploy-log.txt || true
+          git commit -m "chore: save deploy error logs [skip ci]" || true
+          git push origin main || true
