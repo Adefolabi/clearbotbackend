@@ -17,6 +17,11 @@ jobs:
       - name: Set up Fly.io CLI
         uses: superfly/flyctl-actions/setup-flyctl@master
 
+      - name: Create Fly App if not exists
+        run: flyctl apps create clearbotbackend-adefolabi || true
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
       - name: Deploy to Fly.io
         run: flyctl deploy --remote-only
         env:
