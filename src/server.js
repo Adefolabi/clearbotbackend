@@ -7,6 +7,7 @@ const cors       = require('cors');
 const { connectDB } = require('./services/db');
 const { cleanupOldJobs } = require('./services/jobManager');
 const assessmentRoutes = require('./routes/assessment');
+const paymentRoutes    = require('./routes/payment');
 const healthRoutes     = require('./routes/health');
 const logger     = require('./utils/logger');
 
@@ -46,11 +47,16 @@ app.use(cors({
 }));
 
 // ─── Body parsing ─────────────────────────────────────────────────────────────
+// Paystack webhooks need the raw body for signature verification.
+// This must be registered BEFORE express.json() for that specific path.
+app.use('/api/payment/webhook', express.raw({ type: 'application/json' }));
+
 // Cap at 10 kb — credentials are tiny; anything bigger is suspicious.
 app.use(express.json({ limit: '10kb' }));
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 app.use('/api/assessment', assessmentRoutes);
+app.use('/api/payment',    paymentRoutes);
 app.use('/api/health',     healthRoutes);
 
 // ─── 404 handler ─────────────────────────────────────────────────────────────

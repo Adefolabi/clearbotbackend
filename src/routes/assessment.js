@@ -7,7 +7,6 @@ const jobManager = require('../services/jobManager');
 const { runAssessmentBot } = require('../services/bot');
 const { validateStartRequest } = require('../utils/validate');
 const logger     = require('../utils/logger');
-// eslint-disable-next-line no-unused-vars
 const { Run, getCurrentSemester } = require('../services/db');
 
 const router = express.Router();
@@ -60,35 +59,24 @@ router.post('/start', startRateLimiter, async (req, res) => {
   // to close the race window between validation and the first async operation.
   jobManager.lockMatric(matricNumber);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // TODO: PAYSTACK INTEGRATION
-  //
-  // Before starting the bot, verify that this student has a valid
-  // paid + unused run for the current semester in MongoDB.
-  //
-  // If no valid payment exists, return 402 Payment Required along with a
-  // Paystack payment initialisation URL so the frontend can redirect them.
-  //
-  // const semester = getCurrentSemester();
-  // const paymentRecord = await Run.findOne({
-  //   matricNumber: matricNumber.toUpperCase(),
-  //   semester,
-  //   paid:         true,
-  //   runCompleted: false,
-  // });
-  //
-  // if (!paymentRecord) {
-  //   jobManager.unlockMatric(matricNumber);      // release lock — no bot will run
-  //   jobManager.setJobStatus(jobId, 'error');
-  //   return res.status(402).json({
-  //     error:       'Payment required',
-  //     paystackUrl: '<Paystack initialisation URL here>',
-  //   });
-  // }
-  //
-  // paymentRecord.jobId = jobId;
-  // await paymentRecord.save();
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Payment verification ────────────────────────────────────────────────
+  const semester = getCurrentSemester();
+  const paymentRecord = await Run.findOne({
+    matricNumber: matricNumber.toUpperCase(),
+    semester,
+    paid:         true,
+    runCompleted: false,
+  });
+
+  if (!paymentRecord) {
+    jobManager.unlockMatric(matricNumber);
+    jobManager.setJobStatus(jobId, 'error');
+    return res.status(402).json({ error: 'Payment required' });
+  }
+
+  paymentRecord.jobId = jobId;
+  await paymentRecord.save();
+  // ── End payment verification ────────────────────────────────────────────
 
   // ── Start bot in background ─────────────────────────────────────────────
   // We do NOT await — the bot runs asynchronously and pushes progress via SSE.
