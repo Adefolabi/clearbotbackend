@@ -203,6 +203,10 @@ async function clickLoginButton(page) {
 async function handleLogin(page, credentials, jobId) {
   log(jobId, '🔐 Navigating to login page…', { status: 'info' });
 
+  // This is the only page.goto() allowed in the entire login flow.
+  // All subsequent navigation must happen through clicking links on the page,
+  // never through direct URL calls — direct URL navigation after login breaks
+  // the PHP session by racing against server-side session propagation.
   await page.goto(PORTAL_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
   const studentLoginBtn = page.locator(
@@ -294,36 +298,38 @@ async function handleLogin(page, credentials, jobId) {
     logger.warn('Login timed out after 60s', { jobId, url: pageUrl });
 
     if (pageUrl.includes('index.php')) {
-      // Some accounts always land on index.php after login. Rather than waiting 30s
-      // for a redirect that will never come, navigate directly to the student dashboard.
-      // If the session is valid, dashboard2.php loads normally and we continue.
-      // If it bounces back to index.php, the account is a genuine parent session.
-      logger.info('On index.php after 60s — navigating directly to student dashboard', { jobId });
-      await page.goto(PORTAL_URL, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null);
-      await page.waitForSelector(DASHBOARD_SELECTOR, { timeout: 10000 }).catch(() => null);
-      const postTimeoutUrl = page.url();
-      if (postTimeoutUrl.includes('dashboard2.php')) return { result: 'success' };
-      logger.info('Post-timeout direct nav — not on dashboard', { jobId, url: postTimeoutUrl });
-      return { result: 'parent-session' };
+      // 60s elapsed without My Courses appearing in the race. Check the DOM directly —
+      // no page.goto() here: a direct URL jump at this point breaks the PHP session
+      // the same way it does in the success path below.
+      const hasMyCoursesNow = await page.$('a:has-text("My Courses")')
+        .then(el => !!el).catch(() => false);
+      if (hasMyCoursesNow) {
+        logger.info('My Courses found at index.php after 60s timeout — proceeding', { jobId });
+        return { result: 'success' };
+      }
+      const isRolePage = await page.$(
+        'a:has-text("Student Login"), button:has-text("Student Login")'
+      ).then(el => !!el).catch(() => false);
+      if (isRolePage) {
+        logger.info('Role-selection page after 60s timeout — parent session', { jobId, url: pageUrl });
+        return { result: 'parent-session' };
+      }
+      return {
+        result: 'failure',
+        errorText: `Login timed out — stuck at index.php without My Courses after 60s. URL: ${pageUrl}`,
+      };
     }
 
     return { result: 'failure', errorText: `Could not reach student dashboard (url: ${pageUrl})` };
   }
 
+  // Login succeeded — the portal session is valid on whatever page we're on now.
+  // Do NOT navigate to dashboard2.php. A direct URL call here races against PHP
+  // session propagation and causes a redirect to parent-login.php.
+  // discoverCourses will click My Courses naturally from the current page.
   const currentUrl = page.url();
   if (currentUrl.includes('index.php')) {
-    // My Courses is already visible but we're on index.php — direct navigation to
-    // dashboard2.php resolves this for accounts whose portal always lands on index.php.
-    // If it stays on index.php after the goto, it's a genuine parent session.
-    logger.info('My Courses appeared at index.php — navigating directly to student dashboard', { jobId });
-    await page.goto(PORTAL_URL, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null);
-    await page.waitForSelector(DASHBOARD_SELECTOR, { timeout: 10000 }).catch(() => null);
-    const finalUrl = page.url();
-    if (!finalUrl.includes('dashboard2.php')) {
-      logger.info('Direct navigation did not reach dashboard — parent session', { jobId, url: finalUrl });
-      return { result: 'parent-session' };
-    }
-    logger.info('Direct navigation to student dashboard succeeded', { jobId, url: finalUrl });
+    logger.info('Login succeeded — staying at index.php, session intact', { jobId, url: currentUrl });
   }
 
   return { result: 'success' };
@@ -575,6 +581,9 @@ async function navigateToCourse(page, context, courseCode, jobId) {
     .isVisible({ timeout: 3000 }).catch(() => false);
 
   if (!sidebarPresent) {
+    // Mid-run recovery: sidebar disappeared (e.g. a new tab was closed and focus
+    // returned to an intermediate page). The PHP session is fully established at
+    // this point so navigating back to dashboard2.php is safe.
     logger.info('Sidebar not visible — returning to dashboard', { jobId, courseCode });
     await page.goto(PORTAL_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForLoadState('domcontentloaded', { timeout: 15000 });
@@ -599,6 +608,8 @@ async function navigateToCourse(page, context, courseCode, jobId) {
     () => document.body?.innerText?.slice(0, 300) ?? ''
   ).catch(() => '');
   if (/cloudflare/i.test(pageBodySnippet)) {
+    // Mid-run Cloudflare block: reset to dashboard before the caller throws.
+    // Session is established; this goto is safe.
     await page.goto(PORTAL_URL, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => null);
     throw new Error(
       `Cloudflare blocked the course page for ${courseCode}. ` +
