@@ -335,31 +335,6 @@ async function handleLogin(page, credentials, jobId) {
   return { result: 'success' };
 }
 
-async function handleRoleSelectionPage(page, jobId) {
-  logger.info('Role-selection page in discoverCourses — navigating to student portal', { jobId });
-  await page.goto(PORTAL_URL, { waitUntil: 'domcontentloaded', timeout: 20000 });
-
-  const studentBtn = page.locator(
-    'a:has-text("Student Login"), button:has-text("Student Login"), ' +
-    'a:has-text("Student Portal"), button:has-text("Student Portal")'
-  ).first();
-
-  if (await studentBtn.isVisible({ timeout: 8000 }).catch(() => false)) {
-    await studentBtn.click();
-    const myCourses = await page.waitForSelector('a:has-text("My Courses")', { timeout: 20000 }).catch(() => null);
-    if (myCourses) return { result: 'success' };
-  }
-
-  const visibleLinks = await page.$$eval('a',
-    els => els.filter(a => a.offsetParent !== null).map(a => a.innerText.trim()).filter(Boolean)
-  ).catch(() => []);
-
-  return {
-    result: 'failure',
-    errorText: `Could not reach student dashboard from discoverCourses. URL: ${page.url()} Links: ${visibleLinks.slice(0, 8).join(', ')}`,
-  };
-}
-
 // ─── Dashboard modal dismissal ────────────────────────────────────────────────
 
 async function dismissDashboardModal(page, jobId) {
@@ -425,65 +400,45 @@ async function discoverCourses(page, jobId) {
   await page.waitForLoadState('domcontentloaded', { timeout: 15000 });
   await dismissDashboardModal(page, jobId);
 
-  const MY_COURSES_CANDIDATES = [
-    'a:has-text("My Courses")',
-    'a:has-text("My Course")',
-    'a:has-text("Courses")',
-    'a:has-text("Course")',
-    'a:has-text("Registered Courses")',
-    'a:has-text("My Registered Courses")',
-    ':has-text("My Courses")',
-    ':has-text("Courses")',
-  ];
-
-  let clicked = false;
-  for (const sel of MY_COURSES_CANDIDATES) {
-    const el = page.locator(sel).first();
-    const visible = await el.isVisible({ timeout: 3000 }).catch(() => false);
-    if (visible) {
-      await el.click();
-      logger.info('My Courses link clicked', { jobId, selector: sel });
-      clicked = true;
-      break;
-    }
-  }
-
-  if (!clicked) {
+  // My Courses is in the sidebar on index.php — confirmed working by the login
+  // success detection which uses the same selector.
+  //
+  // Using locator.click() with a timeout instead of isVisible() + click():
+  // Playwright's click() waits internally for the element to become actionable
+  // (visible, enabled, scrolled into view) before clicking. This handles the case
+  // where the sidebar accordion needs a moment to render after page load.
+  // isVisible() is a point-in-time check that returns false immediately if the
+  // element is not yet rendered — click() with a timeout is the correct pattern.
+  //
+  // page.goto() is NEVER called here. All navigation is through link clicks only.
+  try {
+    await page.locator('a:has-text("My Courses")').first().click({ timeout: 15000 });
+    logger.info('My Courses link clicked', { jobId });
+  } catch (err) {
+    const currentUrl = page.url();
     const visibleLinks = await page.$$eval('a', els =>
       els.filter(a => a.offsetParent !== null && a.innerText.trim().length > 0)
          .map(a => a.innerText.trim())
-    );
+    ).catch(() => []);
 
-    const onRoleSelectionPage =
-      visibleLinks.includes('Parent Login') || visibleLinks.includes('Student Login');
-
-    if (onRoleSelectionPage) {
-      logger.info('Role/parent-selection page detected in discoverCourses — recovering via root domain', { jobId });
-      const rootUrl = new URL(PORTAL_URL).origin;
-      await page.goto(rootUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
-
-      const studentBtn = page.locator(
-        'a:has-text("Student Login"), button:has-text("Student Login"), ' +
-        'a:has-text("Student Portal"), button:has-text("Student Portal")'
-      ).first();
-      if (await studentBtn.isVisible({ timeout: 8000 }).catch(() => false)) {
-        await studentBtn.click();
-        await page.waitForSelector('a:has-text("My Courses")', { timeout: 25000 });
-        await page.locator('a:has-text("My Courses")').first().click({ timeout: 8000 });
-      } else {
-        throw new Error(
-          'Could not find Student Login on root domain after session redirect. ' +
-          `URL: ${page.url()} — Visible links: ${visibleLinks.slice(0, 10).join(' | ')}`
-        );
-      }
-    } else {
+    // If the session was broken by a navigation (should not happen after login fix),
+    // report exactly where the bot ended up so the caller can diagnose immediately.
+    if (currentUrl.includes('parent') || currentUrl.includes('guardian')) {
       throw new Error(
-        'Could not find the My Courses sidebar link. ' +
-        `Visible links on dashboard: ${visibleLinks.slice(0, 30).join(' | ')}`
+        `Session broken during course discovery — bot is on: ${currentUrl}. ` +
+        `This indicates a page.goto() call occurred after login. ` +
+        `Check discoverCourses for any goto() calls.`
       );
     }
+
+    throw new Error(
+      `My Courses sidebar link not actionable after 15s. URL: ${currentUrl}. ` +
+      `Visible links: ${visibleLinks.slice(0, 20).join(' | ')}`
+    );
   }
 
+  // Wait for course code links to appear in the expanded sidebar dropdown.
+  // Course codes follow the pattern: 2-4 uppercase letters, space, 3-4 digits (e.g. CSC 406).
   await page.waitForFunction(
     () => {
       const all = document.querySelectorAll('a');
@@ -568,7 +523,7 @@ async function discoverCourses(page, jobId) {
  * assessment.php per course. Always returns null for SSHUB. The function exists
  * so a future status endpoint or summary page only requires changing this one function.
  */
-async function tryBatchStatusCheck(page) {
+async function tryBatchStatusCheck() {
   return null;
 }
 
@@ -683,6 +638,12 @@ async function navigateToCourse(page, context, courseCode, jobId) {
 // ─── Core Bot ─────────────────────────────────────────────────────────────────
 
 async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
+  // NAVIGATION RULE: page.goto() is called ONCE — for the initial login page only.
+  // All subsequent navigation uses page.click() on links present in the current DOM.
+  // Reason: SSHUB uses PHP sessions. Direct URL navigation (page.goto) after login
+  // bypasses session validation and triggers redirect to parent-login.php.
+  // If you need to navigate somewhere, find the link on the current page and click it.
+
   const matricForLock = credentials.matricNumber;
 
   let browser     = null;
@@ -781,7 +742,7 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
     // tryBatchStatusCheck returns null for SSHUB (status not in sidebar DOM).
     // When null, the main loop uses the inline two-phase pattern: navigate to the
     // course, read status immediately, skip or fill forms on the already-open page.
-    const batchStatus = await tryBatchStatusCheck(page);
+    const batchStatus = await tryBatchStatusCheck();
 
     if (batchStatus !== null) {
       // Future: batch check returned a map — pre-populate skipped count.

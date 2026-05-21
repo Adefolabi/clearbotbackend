@@ -13,6 +13,12 @@ const logger     = require('./utils/logger');
 const app  = express();
 const PORT = process.env.PORT || 4000;
 
+// Trust Fly.io's reverse proxy so Express correctly extracts the real client IP
+// from the X-Forwarded-For header. Value of 1 = trust one proxy hop (Fly's LB only).
+// Eliminates ERR_ERL_UNEXPECTED_X_FORWARDED_FOR from express-rate-limit on every request.
+// Do NOT use true — that trusts all proxies in the chain, which is a security risk.
+app.set('trust proxy', 1);
+
 // ─── CORS ─────────────────────────────────────────────────────────────────────
 // Wildcard origins cannot be used when credentials are involved (SSE with cookies).
 // Exact origins (production URL + localhost) are listed; Vercel preview deployments
