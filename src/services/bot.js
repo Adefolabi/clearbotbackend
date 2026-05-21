@@ -37,17 +37,10 @@ function fatalError(jobId, message, err) {
 }
 
 // ── Opt 4: Tiered delay configuration ─────────────────────────────────────────
-//
-// Delay ranges calibrated to appear human-like while maximising speed.
-// Do not set betweenCourses below 300ms — below this threshold the submission
-// rate may trigger rate limiting on the SSHUB portal.
-// Increase these values if the portal starts rejecting submissions.
 const DELAYS = {
-  betweenCourses: { min: 400, max: 700 }, // between finishing one course and starting next
-  afterClose:     { min: 200, max: 400 }, // after closing success popup, before next row
-  phaseOneCheck:  { min: 50,  max: 150 }, // between Phase 1 status checks (no form fill)
-  // betweenQuestions intentionally removed — radio fills use evaluate() so portal
-  // never observes inter-question timing; delaying only adds ~2s per form for no gain.
+  betweenCourses: { min: 400, max: 700 },
+  afterClose:     { min: 200, max: 400 },
+  phaseOneCheck:  { min: 50,  max: 150 },
 };
 
 function randomDelay(type) {
@@ -161,7 +154,7 @@ async function selectCampus(page, campus, jobId) {
 
   throw new Error(
     `Could not locate campus dropdown for "${campus}" with any of the 4 selector strategies. ` +
-    'Run inspect-login.js and share inspect-output.json for a precise fix.'
+    'Run diagnose-form.js and inspect the form output for a precise fix.'
   );
 }
 
@@ -204,9 +197,9 @@ async function handleLogin(page, credentials, jobId) {
   log(jobId, '🔐 Navigating to login page…', { status: 'info' });
 
   // This is the only page.goto() allowed in the entire login flow.
-  // All subsequent navigation must happen through clicking links on the page,
-  // never through direct URL calls — direct URL navigation after login breaks
-  // the PHP session by racing against server-side session propagation.
+  // All subsequent navigation must happen through clicking links on the page.
+  // Direct URL navigation after login breaks the PHP session by racing against
+  // server-side session propagation.
   await page.goto(PORTAL_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
   const studentLoginBtn = page.locator(
@@ -224,10 +217,28 @@ async function handleLogin(page, credentials, jobId) {
     await page.waitForSelector('input[type="password"]', { timeout: 15000 });
   }
 
-  // Opt 3: domcontentloaded is sufficient — Login button's JS handler attaches
-  // during DOMContentLoaded. waitForLoadState('load') added 1-2s waiting for
-  // images/fonts that the bot never needs.
   await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => null);
+
+  // ── Fix 1: read and log all hidden fields immediately after form loads ────────
+  // Hidden fields control server-side behaviour including role assignment.
+  // This creates a permanent record in every production log run.
+  // Look for this line in logs to diagnose role assignment problems.
+  const hiddenFields = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('input[type="hidden"]'))
+      .map(el => ({ name: el.name || '(none)', value: el.value || '', id: el.id || '' }))
+  );
+  logger.info('Login form hidden fields', { jobId, count: hiddenFields.length, fields: hiddenFields });
+
+  const ROLE_KEYWORDS = ['role', 'user_type', 'login_type', 'type', 'usertype'];
+  const roleFields = hiddenFields.filter(f =>
+    ROLE_KEYWORDS.some(kw => f.name.toLowerCase().includes(kw))
+  );
+  if (roleFields.length > 0) {
+    logger.info('Role-related hidden fields found', { jobId, roleFields });
+  } else {
+    logger.info('No role-related hidden fields detected in login form', { jobId });
+  }
+  // ── End Fix 1 ─────────────────────────────────────────────────────────────────
 
   const matricInput = await findMatricInput(page);
   await matricInput.fill(credentials.matricNumber);
@@ -244,6 +255,63 @@ async function handleLogin(page, credentials, jobId) {
     logger.info('Campus field not present — skipping (portal auto-detects from matric)', { jobId });
   }
 
+  // ── Fix 4: ensure the student role field is set before form submission ────────
+  // The portal PHP server assigns user roles based on a hidden form field.
+  // If this field is absent or has the wrong value, the server defaults to parent role.
+  //
+  // ⚠️  PLACEHOLDER VALUES — must be updated from diagnose-form.js output:
+  //     Run: node diagnose-form.js
+  //     Find: "=== POST REQUEST INTERCEPTED ===" and "=== HIDDEN FIELDS ==="
+  //     ROLE_FIELD_NAME:   the exact `name` attribute of the role field
+  //                        (common values: "role", "user_type", "login_type", "type")
+  //     STUDENT_ROLE_VALUE: the value that means student
+  //                        (common values: "student", "1", "std", "2")
+  //
+  // If diagnose-form.js shows no hidden role field: delete this block entirely.
+  // If diagnose-form.js shows a role field: update the two constants below and deploy.
+  const ROLE_FIELD_NAME    = 'role';     // ← UPDATE from diagnose-form.js
+  const STUDENT_ROLE_VALUE = 'student';  // ← UPDATE from diagnose-form.js
+
+  await page.evaluate(([fieldName, fieldValue]) => {
+    const form = document.querySelector('form');
+    if (!form) return;
+    let roleField = form.querySelector(`input[name="${fieldName}"]`);
+    if (roleField) {
+      roleField.value = fieldValue;
+    } else {
+      const newField = document.createElement('input');
+      newField.type  = 'hidden';
+      newField.name  = fieldName;
+      newField.value = fieldValue;
+      form.appendChild(newField);
+    }
+  }, [ROLE_FIELD_NAME, STUDENT_ROLE_VALUE]);
+
+  logger.info('Role field ensured before form submit', {
+    jobId, fieldName: ROLE_FIELD_NAME, value: STUDENT_ROLE_VALUE,
+  });
+  // ── End Fix 4 ─────────────────────────────────────────────────────────────────
+
+  // ── Fix 2: intercept the login POST to log what the server actually receives ──
+  // Password is always masked — raw credentials are never written to logs.
+  // Look for "Login POST data sent to portal" in server logs to see role field presence.
+  // Interceptor is removed immediately after the outcome race resolves.
+  const loginPostHandler = request => {
+    if (
+      request.method() === 'POST' &&
+      request.url().includes('bowenstudent.bowen.edu.ng')
+    ) {
+      const raw    = request.postData() || '';
+      const masked = raw
+        .replace(/password=[^&]*/gi, 'password=***')
+        .replace(/pass=[^&]*/gi,     'pass=***')
+        .replace(/pwd=[^&]*/gi,      'pwd=***');
+      logger.info('Login POST data sent to portal', { jobId, data: masked });
+    }
+  };
+  page.on('request', loginPostHandler);
+  // ── End Fix 2 setup ───────────────────────────────────────────────────────────
+
   const btnUsed = await clickLoginButton(page);
   logger.info('Login button clicked', { jobId, selector: btnUsed });
 
@@ -258,6 +326,10 @@ async function handleLogin(page, credentials, jobId) {
       .then(() => 'error-element').catch(() => null),
     new Promise(resolve => setTimeout(() => resolve('timeout'), 65000)),
   ]);
+
+  // ── Fix 2: remove POST interceptor — login request already captured ───────────
+  page.off('request', loginPostHandler);
+  // ── End Fix 2 teardown ────────────────────────────────────────────────────────
 
   if (outcome === 'error-element') {
     const errorText = await page.textContent(ERROR_SELECTOR).catch(() => '');
@@ -298,9 +370,6 @@ async function handleLogin(page, credentials, jobId) {
     logger.warn('Login timed out after 60s', { jobId, url: pageUrl });
 
     if (pageUrl.includes('index.php')) {
-      // 60s elapsed without My Courses appearing in the race. Check the DOM directly —
-      // no page.goto() here: a direct URL jump at this point breaks the PHP session
-      // the same way it does in the success path below.
       const hasMyCoursesNow = await page.$('a:has-text("My Courses")')
         .then(el => !!el).catch(() => false);
       if (hasMyCoursesNow) {
@@ -323,9 +392,8 @@ async function handleLogin(page, credentials, jobId) {
     return { result: 'failure', errorText: `Could not reach student dashboard (url: ${pageUrl})` };
   }
 
-  // Login succeeded — the portal session is valid on whatever page we're on now.
-  // Do NOT navigate to dashboard2.php. A direct URL call here races against PHP
-  // session propagation and causes a redirect to parent-login.php.
+  // Login succeeded — stay on the current page. Do NOT navigate to dashboard2.php.
+  // A direct URL call races against PHP session propagation and causes a redirect to parent-login.php.
   // discoverCourses will click My Courses naturally from the current page.
   const currentUrl = page.url();
   if (currentUrl.includes('index.php')) {
@@ -338,10 +406,7 @@ async function handleLogin(page, credentials, jobId) {
 // ─── Dashboard modal dismissal ────────────────────────────────────────────────
 
 async function dismissDashboardModal(page, jobId) {
-  // Opt 3: page.$() queries the DOM once instantly — if the element is absent it
-  // returns null in < 1ms. The previous waitForSelector polled for up to 4 seconds
-  // on every single course navigation, costing 4s × course_count per run.
-  const MODAL_SEL = '.modal.show, .modal.fade.show, .modal.in, [role="dialog"]';
+  const MODAL_SEL    = '.modal.show, .modal.fade.show, .modal.in, [role="dialog"]';
   const modalEl      = await page.$(MODAL_SEL).catch(() => null);
   const modalVisible = modalEl ? await modalEl.isVisible().catch(() => false) : false;
 
@@ -375,7 +440,6 @@ async function dismissDashboardModal(page, jobId) {
   }
 
   if (!closed) {
-    // hallModal uses data-keyboard="false" — Escape is disabled. Force-click any button.
     const anyModalBtn = page.locator(
       '#hallModal button, .modal.show button, [role="dialog"] button'
     ).first();
@@ -400,29 +464,20 @@ async function discoverCourses(page, jobId) {
   await page.waitForLoadState('domcontentloaded', { timeout: 15000 });
   await dismissDashboardModal(page, jobId);
 
-  // My Courses is in the sidebar on index.php — confirmed working by the login
-  // success detection which uses the same selector.
-  //
-  // Using locator.click() with a timeout instead of isVisible() + click():
-  // Playwright's click() waits internally for the element to become actionable
-  // (visible, enabled, scrolled into view) before clicking. This handles the case
-  // where the sidebar accordion needs a moment to render after page load.
-  // isVisible() is a point-in-time check that returns false immediately if the
-  // element is not yet rendered — click() with a timeout is the correct pattern.
-  //
-  // page.goto() is NEVER called here. All navigation is through link clicks only.
+  // My Courses is in the sidebar on index.php — confirmed working by login detection.
+  // Using locator.click() with a timeout: Playwright waits internally for the element
+  // to become actionable (visible, enabled, scrolled into view) before clicking.
+  // page.goto() is NEVER called here — all navigation is through link clicks only.
   try {
     await page.locator('a:has-text("My Courses")').first().click({ timeout: 15000 });
     logger.info('My Courses link clicked', { jobId });
   } catch (err) {
-    const currentUrl = page.url();
+    const currentUrl   = page.url();
     const visibleLinks = await page.$$eval('a', els =>
       els.filter(a => a.offsetParent !== null && a.innerText.trim().length > 0)
          .map(a => a.innerText.trim())
     ).catch(() => []);
 
-    // If the session was broken by a navigation (should not happen after login fix),
-    // report exactly where the bot ended up so the caller can diagnose immediately.
     if (currentUrl.includes('parent') || currentUrl.includes('guardian')) {
       throw new Error(
         `Session broken during course discovery — bot is on: ${currentUrl}. ` +
@@ -437,8 +492,6 @@ async function discoverCourses(page, jobId) {
     );
   }
 
-  // Wait for course code links to appear in the expanded sidebar dropdown.
-  // Course codes follow the pattern: 2-4 uppercase letters, space, 3-4 digits (e.g. CSC 406).
   await page.waitForFunction(
     () => {
       const all = document.querySelectorAll('a');
@@ -447,12 +500,7 @@ async function discoverCourses(page, jobId) {
     { timeout: 10000 }
   );
 
-  // ── Opt 1: Walk the sidebar DOM to tag each course with its semester ──────────
-  // The portal groups courses under "1ST SEMESTER" / "2ND SEMESTER" headings inside
-  // the expanded collapse container. We detect these headings as we walk down the
-  // element list so each course link gets a semester tag. If no headings are found
-  // (portal structure changed) every course gets semester: null and the fallback
-  // below processes all of them rather than zero.
+  // ── Opt 1: Walk sidebar DOM to tag each course with its semester ──────────────
   const tagged = await page.evaluate(() => {
     const results  = [];
     let currentSem = null;
@@ -477,7 +525,6 @@ async function discoverCourses(page, jobId) {
     return results;
   });
 
-  // Deduplicate by code — sidebar may list the same course twice.
   const seen      = new Set();
   const allCourses = tagged.filter(c => {
     if (seen.has(c.code)) return false;
@@ -485,13 +532,10 @@ async function discoverCourses(page, jobId) {
     return true;
   });
 
-  // ── Opt 1: Filter to the active semester ─────────────────────────────────────
-  // getCurrentSemester() returns e.g. "2025_2026_2nd" — take the last segment.
-  const semLabel    = getCurrentSemester().split('_').pop(); // '1st' or '2nd'
+  const semLabel    = getCurrentSemester().split('_').pop();
   const taggedCount = allCourses.filter(c => c.semester !== null).length;
 
   if (taggedCount === 0 && allCourses.length > 0) {
-    // No semester headings found — process everything rather than nothing.
     logger.warn('Semester DOM tagging found no headings — processing all courses as fallback', { jobId });
     return allCourses;
   }
@@ -512,17 +556,6 @@ async function discoverCourses(page, jobId) {
 
 // ─── Batch status pre-check (Opt 2) ──────────────────────────────────────────
 
-/**
- * Attempts to read assessment status for all courses from the current page
- * without navigating to each course individually.
- *
- * Returns Map<courseCode, 'pending'|'done'> if the dashboard exposes status,
- * or null if per-course navigation is required (falls back to inline two-phase).
- *
- * SSHUB only shows course codes in the sidebar — status requires visiting
- * assessment.php per course. Always returns null for SSHUB. The function exists
- * so a future status endpoint or summary page only requires changing this one function.
- */
 async function tryBatchStatusCheck() {
   return null;
 }
@@ -536,25 +569,17 @@ async function navigateToCourse(page, context, courseCode, jobId) {
     .isVisible({ timeout: 3000 }).catch(() => false);
 
   if (!sidebarPresent) {
-    // Mid-run recovery: sidebar disappeared (e.g. a new tab was closed and focus
-    // returned to an intermediate page). The PHP session is fully established at
-    // this point so navigating back to dashboard2.php is safe.
     logger.info('Sidebar not visible — returning to dashboard', { jobId, courseCode });
     await page.goto(PORTAL_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForLoadState('domcontentloaded', { timeout: 15000 });
   }
 
-  // Opt 3: instant modal check — page.$() returns null immediately if absent.
   await dismissDashboardModal(page, jobId);
 
   await page.locator(MY_COURSES_LINK).first().click({ timeout: 8000 });
 
   const courseLink = page.locator('a').filter({ hasText: new RegExp(`^${courseCode}$`) }).first();
   await courseLink.waitFor({ state: 'visible', timeout: 8000 });
-  // force:true dispatches the click event directly to the element, bypassing Playwright's
-  // pointer-event interception check. Without this, overlapping sidebar nav links (e.g.
-  // payment.php) or the My Courses collapse toggle can intercept the click, causing the
-  // sidebar to collapse and the course link to become invisible — a 30s timeout.
   await courseLink.click({ force: true });
 
   await page.waitForLoadState('domcontentloaded', { timeout: 15000 });
@@ -563,8 +588,6 @@ async function navigateToCourse(page, context, courseCode, jobId) {
     () => document.body?.innerText?.slice(0, 300) ?? ''
   ).catch(() => '');
   if (/cloudflare/i.test(pageBodySnippet)) {
-    // Mid-run Cloudflare block: reset to dashboard before the caller throws.
-    // Session is established; this goto is safe.
     await page.goto(PORTAL_URL, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => null);
     throw new Error(
       `Cloudflare blocked the course page for ${courseCode}. ` +
@@ -601,9 +624,6 @@ async function navigateToCourse(page, context, courseCode, jobId) {
     );
   }
 
-  // Opt 5: Promise.all starts the page-event listener and the click simultaneously.
-  // If no new tab opens within 12s, .catch(() => null) resolves with null and we
-  // fall back to using the current page — no unhandled rejection.
   const [newTabPage] = await Promise.all([
     context.waitForEvent('page', { timeout: 12000 }).catch(() => null),
     page.click(assessmentSel),
@@ -618,7 +638,6 @@ async function navigateToCourse(page, context, courseCode, jobId) {
     assessmentPage = newTabPage;
     isNewTab = true;
     logger.info('Assessment list opened in new tab', { jobId, courseCode, url: assessmentPage.url() });
-    // Opt 3 + 5: wait for the rows we need — skip waitForLoadState entirely.
     await assessmentPage.waitForSelector(
       'td button:has-text("Assess"), td a:has-text("Assess"), td:has-text("Assessed")',
       { timeout: 35000 }
@@ -657,9 +676,6 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
   jobManager.setJobCredentials(jobId, credentials);
   jobManager.setJobStatus(jobId, 'running');
 
-  // Each assessment row takes ~25-30s of portal processing time (not reducible).
-  // A student with 10 pending courses × 3 lecturers × 30s = 15 minutes of form time
-  // plus ~2 minutes of navigation = 17 minutes worst case. 20 minutes covers this.
   const JOB_TIMEOUT_MS = 20 * 60 * 1000;
   const jobTimeout = setTimeout(async () => {
     jobTimedOut = true;
@@ -728,6 +744,38 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
 
     log(jobId, '✅ Login successful', { status: 'success' });
 
+    // ── Fix 3: verify the portal rendered the student dashboard ────────────────
+    // Both student and parent dashboards use index.php — the URL alone cannot
+    // distinguish them. The server assigns a role based on the hidden form field
+    // sent during login. If the wrong role was assigned, the student sidebar never
+    // appears and "My Courses" is not in the DOM at all.
+    //
+    // page.$() checks DOM presence instantly (no visibility wait) so this takes
+    // under 1 second regardless of sidebar accordion state.
+    log(jobId, '🔍 Verifying student dashboard…', { status: 'info' });
+
+    const isStudentDashboard = await page.$(
+      'a:has-text("My Courses"), a:has-text("Course Reg"), a:has-text("My Result")'
+    ).then(el => !!el).catch(() => false);
+
+    if (!isStudentDashboard) {
+      const visibleLinks = await page.$$eval('a', els =>
+        els.filter(a => a.offsetParent !== null && a.innerText.trim().length > 0)
+           .map(a => a.innerText.trim())
+      ).catch(() => []);
+      fatalError(jobId,
+        `❌ Portal served parent dashboard after login. ` +
+        `URL: ${page.url()}. ` +
+        `Visible links: ${visibleLinks.slice(0, 15).join(' | ')}. ` +
+        `Check server logs for "Login POST data sent to portal" to see if role field is missing. ` +
+        `Then update ROLE_FIELD_NAME/STUDENT_ROLE_VALUE in handleLogin and redeploy.`
+      );
+      return;
+    }
+
+    log(jobId, '✅ Student dashboard confirmed', { status: 'success' });
+    // ── End Fix 3 ──────────────────────────────────────────────────────────────
+
     // ── Course discovery (Opt 1 semester filter runs inside) ────────────────
     const courses = await discoverCourses(page, jobId);
 
@@ -738,14 +786,9 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
 
     log(jobId, `📋 Found ${courses.length} course(s) to process`, { status: 'info', count: courses.length });
 
-    // ── Opt 2: Attempt batch status pre-check ───────────────────────────────
-    // tryBatchStatusCheck returns null for SSHUB (status not in sidebar DOM).
-    // When null, the main loop uses the inline two-phase pattern: navigate to the
-    // course, read status immediately, skip or fill forms on the already-open page.
     const batchStatus = await tryBatchStatusCheck();
 
     if (batchStatus !== null) {
-      // Future: batch check returned a map — pre-populate skipped count.
       for (const [code, status] of batchStatus) {
         if (status === 'done') {
           const course = courses.find(c => c.code === code);
@@ -759,23 +802,10 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
 
     progress(jobId, 0, courses.length, skipped);
 
-    const ASSESS_SELECTOR      = 'td button:has-text("Assess"), td a:has-text("Assess")';
-    // Courses that fail during the navigation phase (before forms are reached) are
-    // queued here and retried once after all other courses finish. This covers both
-    // Cloudflare transient blocks and click-interception timeouts like MAS 499.
-    // Courses that fail during form submission (validation errors) are NOT queued —
-    // they are marked failed immediately since a retry won't change the outcome.
-    const retryQueue = [];
-    let   inRetryPass = false;
+    const ASSESS_SELECTOR = 'td button:has-text("Assess"), td a:has-text("Assess")';
+    const retryQueue      = [];
+    let   inRetryPass     = false;
 
-    // ── processCourse — inner closure ──────────────────────────────────────────
-    // Defined inside runAssessmentBot so it directly reads/writes the outer variables
-    // (completed, skipped, failed, consecutiveFails, page, context, jobId, etc.)
-    // without needing to pass them as parameters.
-    //
-    // Retry behaviour:
-    //   Main pass  (inRetryPass=false): navigation/structural error → push to retryQueue.
-    //   Retry pass (inRetryPass=true):  same error → mark as failed (no re-queuing).
     async function processCourse(course) {
       let assessmentPage     = null;
       let assessmentIsNewTab = false;
@@ -815,13 +845,11 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
           return;
         }
 
-        // ── Process each pending lecturer row ─────────────────────────────────
         while (true) {
           const assessBtn    = assessmentPage.locator(ASSESS_SELECTOR).first();
           const stillVisible = await assessBtn.isVisible({ timeout: 5000 }).catch(() => false);
           if (!stillVisible) break;
 
-          // Opt 5: parallel capture — listener and click start simultaneously.
           const [newFormPage] = await Promise.all([
             context.waitForEvent('page', { timeout: 12000 }).catch(() => null),
             assessBtn.click({ force: true }),
@@ -848,7 +876,6 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
           }
 
           try {
-            // ── Probe for instructions screen ─────────────────────────────
             const formContainer = assessPage.locator('form, [class*="assess"], main, #content').first();
             const nextBtn = formContainer
               .locator('button:has-text("Next"), input[value="Next"], a:has-text("Next")')
@@ -857,14 +884,12 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
               .then(() => true).catch(() => false);
             if (hasNextBtn) await nextBtn.click();
 
-            // ── Wait for radio buttons ────────────────────────────────────
             const assessForm = assessPage.locator('form').first();
             await assessForm.locator('input[type="radio"]').first()
               .waitFor({ state: 'attached', timeout: 10000 });
 
             await assertIsAssessmentPage(assessPage);
 
-            // ── Answer all questions ──────────────────────────────────────
             const targetRating = (
               ratings.perCourseRatings?.[course.code] ?? ratings.defaultRating
             ).toString();
@@ -894,7 +919,6 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
               }
             }
 
-            // ── Fill required final comment ───────────────────────────────
             await assessPage.evaluate(() => {
               const form = document.querySelector('form') || document;
               form.querySelectorAll('textarea').forEach(ta => {
@@ -906,7 +930,6 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
               });
             });
 
-            // ── Submit (gated by dryRun) ──────────────────────────────────
             if (!dryRun) {
               let dialogMessage = '';
               const dialogHandler = async (dialog) => {
@@ -997,15 +1020,11 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
         });
 
       } catch (courseErr) {
-        // Form validation errors (the portal said the form was incomplete/invalid) are
-        // definitive — retrying with the same inputs won't help, so mark as failed now.
-        // Everything else (click timeouts, nav timeouts, assertion failures, etc.) is a
-        // transient navigation issue: queue for retry and don't count as a failure yet.
         const isFormError = /form validation error|submit button not found/i.test(courseErr.message);
 
         if (!inRetryPass && !isFormError) {
           retryQueue.push(course);
-          consecutiveFails = 0; // navigation failures don't count toward the 5-fail abort
+          consecutiveFails = 0;
           log(jobId,
             `⏳ ${course.code} — navigation error, queued for end-of-run retry`,
             { status: 'info', courseCode: course.code }
@@ -1041,10 +1060,6 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
     }
 
     // ── Retry pass ─────────────────────────────────────────────────────────────
-    // Courses that failed due to transient navigation errors (Cloudflare blocks,
-    // click interceptions, page timeouts) are retried once here after all other
-    // courses are done. A 10-second pause lets any rate limits clear before retrying.
-    // inRetryPass=true prevents re-queuing: a second failure marks the course as failed.
     if (retryQueue.length > 0) {
       log(jobId,
         `🔄 All other courses done — retrying ${retryQueue.length} course(s) that had navigation errors (10s pause)…`,
