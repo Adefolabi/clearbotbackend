@@ -60,22 +60,26 @@ router.post('/start', startRateLimiter, async (req, res) => {
   jobManager.lockMatric(matricNumber);
 
   // ── Payment verification ────────────────────────────────────────────────
-  const semester = getCurrentSemester();
-  const paymentRecord = await Run.findOne({
-    matricNumber: matricNumber.toUpperCase(),
-    semester,
-    paid:         true,
-    runCompleted: false,
-  });
+  // Skipped when PAYSTACK_SECRET_KEY is not set (dev/testing mode).
+  // In production, set PAYSTACK_SECRET_KEY on Fly.io to enforce payment.
+  if (process.env.PAYSTACK_SECRET_KEY) {
+    const semester = getCurrentSemester();
+    const paymentRecord = await Run.findOne({
+      matricNumber: matricNumber.toUpperCase(),
+      semester,
+      paid:         true,
+      runCompleted: false,
+    });
 
-  if (!paymentRecord) {
-    jobManager.unlockMatric(matricNumber);
-    jobManager.setJobStatus(jobId, 'error');
-    return res.status(402).json({ error: 'Payment required' });
+    if (!paymentRecord) {
+      jobManager.unlockMatric(matricNumber);
+      jobManager.setJobStatus(jobId, 'error');
+      return res.status(402).json({ error: 'Payment required' });
+    }
+
+    paymentRecord.jobId = jobId;
+    await paymentRecord.save();
   }
-
-  paymentRecord.jobId = jobId;
-  await paymentRecord.save();
   // ── End payment verification ────────────────────────────────────────────
 
   // ── Start bot in background ─────────────────────────────────────────────
