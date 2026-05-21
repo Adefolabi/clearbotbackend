@@ -297,7 +297,7 @@ async function handleLogin(page, credentials, jobId) {
   if (outcome === 'error-element') {
     const errorText = await page.textContent(ERROR_SELECTOR).catch(() => '');
     if (ERROR_KEYWORDS.test(errorText)) {
-      return { result: 'failure', errorText: errorText.trim() };
+      return { result: 'bad-credentials' };
     }
     logger.info('Alert element matched but text is non-error — treating as success', {
       jobId, text: errorText.trim().slice(0, 80),
@@ -733,6 +733,13 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
       log(jobId, '🔄 Parent session detected — clearing cookies and retrying login…', { status: 'info' });
       await context.clearCookies();
       loginOutcome = await handleLogin(page, credentials, jobId);
+    }
+
+    if (loginOutcome.result === 'bad-credentials') {
+      fatalError(jobId,
+        '❌ Wrong matric number or password — please check your details and try again.'
+      );
+      return;
     }
 
     if (loginOutcome.result === 'failure' || loginOutcome.result === 'parent-session') {
