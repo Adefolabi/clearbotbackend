@@ -255,43 +255,6 @@ async function handleLogin(page, credentials, jobId) {
     logger.info('Campus field not present — skipping (portal auto-detects from matric)', { jobId });
   }
 
-  // ── Fix 4: ensure the student role field is set before form submission ────────
-  // The portal PHP server assigns user roles based on a hidden form field.
-  // If this field is absent or has the wrong value, the server defaults to parent role.
-  //
-  // ⚠️  PLACEHOLDER VALUES — must be updated from diagnose-form.js output:
-  //     Run: node diagnose-form.js
-  //     Find: "=== POST REQUEST INTERCEPTED ===" and "=== HIDDEN FIELDS ==="
-  //     ROLE_FIELD_NAME:   the exact `name` attribute of the role field
-  //                        (common values: "role", "user_type", "login_type", "type")
-  //     STUDENT_ROLE_VALUE: the value that means student
-  //                        (common values: "student", "1", "std", "2")
-  //
-  // If diagnose-form.js shows no hidden role field: delete this block entirely.
-  // If diagnose-form.js shows a role field: update the two constants below and deploy.
-  const ROLE_FIELD_NAME    = 'role';     // ← UPDATE from diagnose-form.js
-  const STUDENT_ROLE_VALUE = 'student';  // ← UPDATE from diagnose-form.js
-
-  await page.evaluate(([fieldName, fieldValue]) => {
-    const form = document.querySelector('form');
-    if (!form) return;
-    let roleField = form.querySelector(`input[name="${fieldName}"]`);
-    if (roleField) {
-      roleField.value = fieldValue;
-    } else {
-      const newField = document.createElement('input');
-      newField.type  = 'hidden';
-      newField.name  = fieldName;
-      newField.value = fieldValue;
-      form.appendChild(newField);
-    }
-  }, [ROLE_FIELD_NAME, STUDENT_ROLE_VALUE]);
-
-  logger.info('Role field ensured before form submit', {
-    jobId, fieldName: ROLE_FIELD_NAME, value: STUDENT_ROLE_VALUE,
-  });
-  // ── End Fix 4 ─────────────────────────────────────────────────────────────────
-
   // ── Fix 2: intercept the login POST to log what the server actually receives ──
   // Password is always masked — raw credentials are never written to logs.
   // Look for "Login POST data sent to portal" in server logs to see role field presence.
@@ -392,12 +355,47 @@ async function handleLogin(page, credentials, jobId) {
     return { result: 'failure', errorText: `Could not reach student dashboard (url: ${pageUrl})` };
   }
 
-  // Login succeeded — stay on the current page. Do NOT navigate to dashboard2.php.
-  // A direct URL call races against PHP session propagation and causes a redirect to parent-login.php.
-  // discoverCourses will click My Courses naturally from the current page.
+  // Credentials accepted — determine which page the portal landed us on.
+  // Do NOT navigate via page.goto() — that breaks the PHP session.
   const currentUrl = page.url();
   if (currentUrl.includes('index.php')) {
-    logger.info('Login succeeded — staying at index.php, session intact', { jobId, url: currentUrl });
+    // The portal uses a 3-step login flow:
+    //   1. Navigate → click "Student Login" → fill credentials → submit
+    //   2. Server validates credentials → redirects to index.php (role-selection page)
+    //   3. Click "Student Login" again on index.php → student dashboard loads
+    //
+    // Diagnose-form.js confirmed: no hidden role fields exist. The portal role is
+    // determined by which button the user clicks on the index.php role-selection page.
+    // The bot must click "Student Login" here to complete the login flow.
+
+    // Fast check: are we already on the student dashboard? (My Courses in DOM)
+    const alreadyOnStudentDash = await page.$('a:has-text("My Courses")')
+      .then(el => !!el).catch(() => false);
+
+    if (alreadyOnStudentDash) {
+      logger.info('Login succeeded — student dashboard at index.php', { jobId, url: currentUrl });
+      return { result: 'success' };
+    }
+
+    // Not on student dashboard — look for role-selection "Student Login" link.
+    // page.$() checks DOM presence without visibility restrictions.
+    const studentEntryEl = await page.$(
+      'a:has-text("Student Login"), button:has-text("Student Login"), ' +
+      'a:has-text("Student Portal"), button:has-text("Student Portal")'
+    ).catch(() => null);
+
+    if (studentEntryEl) {
+      logger.info('Role-selection page at index.php — clicking Student Login to complete login', { jobId });
+      log(jobId, '🖱️  Entering student portal…', { status: 'info' });
+      await studentEntryEl.click({ force: true });
+      await page.waitForSelector('a:has-text("My Courses")', { timeout: 30000 }).catch(() => null);
+      logger.info('Student portal entered after role-selection click', { jobId, url: page.url() });
+      return { result: 'success' };
+    }
+
+    // No student dashboard and no role-selection link — session assigned parent role.
+    logger.info('index.php has no My Courses and no Student Login link — parent session', { jobId });
+    return { result: 'parent-session' };
   }
 
   return { result: 'success' };
@@ -767,8 +765,8 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
         `❌ Portal served parent dashboard after login. ` +
         `URL: ${page.url()}. ` +
         `Visible links: ${visibleLinks.slice(0, 15).join(' | ')}. ` +
-        `Check server logs for "Login POST data sent to portal" to see if role field is missing. ` +
-        `Then update ROLE_FIELD_NAME/STUDENT_ROLE_VALUE in handleLogin and redeploy.`
+        `Check server logs for "Login POST data sent to portal" and "Role-selection page at index.php" ` +
+        `to trace the login flow. The portal uses a 3-step login — see handleLogin comments.`
       );
       return;
     }
