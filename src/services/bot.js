@@ -735,15 +735,18 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
       loginOutcome = await handleLogin(page, credentials, jobId);
     }
 
-    if (loginOutcome.result === 'bad-credentials') {
+    if (
+      loginOutcome.result === 'bad-credentials' ||
+      loginOutcome.result === 'parent-session'
+    ) {
       fatalError(jobId,
         '❌ Wrong matric number or password — please check your details and try again.'
       );
       return;
     }
 
-    if (loginOutcome.result === 'failure' || loginOutcome.result === 'parent-session') {
-      fatalError(jobId, `❌ Login failed: ${loginOutcome.errorText ?? 'Portal kept redirecting to parent session after retry.'}`);
+    if (loginOutcome.result === 'failure') {
+      fatalError(jobId, `❌ Login failed: ${loginOutcome.errorText ?? 'Could not reach the student portal.'}`);
       return;
     }
 
