@@ -131,6 +131,12 @@ router.get('/status/:reference', async (req, res) => {
       return res.status(200).json({ paid: false, runCompleted: false });
     }
 
+    // Reject if the amount doesn't match — prevents charging ₦1 and getting a full run.
+    if (psData.data?.amount !== AMOUNT_KOBO) {
+      logger.warn('Paystack amount mismatch', { reference, expected: AMOUNT_KOBO, got: psData.data?.amount });
+      return res.status(200).json({ paid: false, runCompleted: false });
+    }
+
     // Paystack confirmed — mark the Run as paid.
     const run = await Run.findOneAndUpdate(
       { paystackRef: reference },
@@ -180,7 +186,14 @@ router.post('/webhook', async (req, res) => {
     .update(req.body)
     .digest('hex');
 
-  if (hash !== signature) {
+  // timingSafeEqual prevents timing attacks that could reveal the expected hash
+  // by exploiting how long a string comparison takes character-by-character.
+  const hashBuf = Buffer.from(hash, 'hex');
+  const sigBuf  = Buffer.from(signature, 'hex');
+  const signatureValid = hashBuf.length === sigBuf.length &&
+    crypto.timingSafeEqual(hashBuf, sigBuf);
+
+  if (!signatureValid) {
     logger.warn('Paystack webhook signature mismatch');
     return res.status(401).send('Unauthorized');
   }

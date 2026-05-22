@@ -50,6 +50,14 @@ router.post('/start', startRateLimiter, async (req, res) => {
     });
   }
 
+  // ── Global capacity check ──────────────────────────────────────────────────
+  // Prevent server memory exhaustion — each Playwright browser uses ~200–400 MB.
+  if (jobManager.getRunningJobCount() >= jobManager.MAX_CONCURRENT_JOBS) {
+    return res.status(503).json({
+      error: 'Server is at capacity — please try again in a few minutes.',
+    });
+  }
+
   // ── Generate job ID ─────────────────────────────────────────────────────
   const jobId = crypto.randomUUID();
   jobManager.createJob(jobId, { dryRun }); // Measure 9: dryRun stored in job record

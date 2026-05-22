@@ -462,32 +462,50 @@ async function discoverCourses(page, jobId) {
   await page.waitForLoadState('domcontentloaded', { timeout: 15000 });
   await dismissDashboardModal(page, jobId);
 
-  // My Courses is in the sidebar on index.php — confirmed working by login detection.
-  // Using locator.click() with a timeout: Playwright waits internally for the element
-  // to become actionable (visible, enabled, scrolled into view) before clicking.
+  // After modal dismissal, the Bootstrap backdrop (.modal-backdrop) can linger as a
+  // full-screen overlay and intercept all subsequent clicks even though the modal
+  // content is gone. Remove it via JS so the sidebar is clickable.
+  const backdropsRemoved = await page.evaluate(() => {
+    const backdrops = document.querySelectorAll('.modal-backdrop');
+    backdrops.forEach(el => el.remove());
+    if (backdrops.length > 0) document.body.classList.remove('modal-open');
+    return backdrops.length;
+  }).catch(() => 0);
+  if (backdropsRemoved > 0) {
+    logger.info('Removed lingering modal backdrops', { jobId, count: backdropsRemoved });
+  }
+
   // page.goto() is NEVER called here — all navigation is through link clicks only.
   try {
     await page.locator('a:has-text("My Courses")').first().click({ timeout: 15000 });
     logger.info('My Courses link clicked', { jobId });
-  } catch (err) {
-    const currentUrl   = page.url();
-    const visibleLinks = await page.$$eval('a', els =>
-      els.filter(a => a.offsetParent !== null && a.innerText.trim().length > 0)
-         .map(a => a.innerText.trim())
-    ).catch(() => []);
+  } catch (_firstErr) {
+    // Element visible but still intercepted — force-click dispatches directly at the
+    // element's coordinates, bypassing the actionability/interception check.
+    logger.warn('My Courses not actionable — retrying with force:true', { jobId });
+    try {
+      await page.locator('a:has-text("My Courses")').first().click({ force: true, timeout: 10000 });
+      logger.info('My Courses link clicked (force)', { jobId });
+    } catch (err) {
+      const currentUrl   = page.url();
+      const visibleLinks = await page.$$eval('a', els =>
+        els.filter(a => a.offsetParent !== null && a.innerText.trim().length > 0)
+           .map(a => a.innerText.trim())
+      ).catch(() => []);
 
-    if (currentUrl.includes('parent') || currentUrl.includes('guardian')) {
+      if (currentUrl.includes('parent') || currentUrl.includes('guardian')) {
+        throw new Error(
+          `Session broken during course discovery — bot is on: ${currentUrl}. ` +
+          `This indicates a page.goto() call occurred after login. ` +
+          `Check discoverCourses for any goto() calls.`
+        );
+      }
+
       throw new Error(
-        `Session broken during course discovery — bot is on: ${currentUrl}. ` +
-        `This indicates a page.goto() call occurred after login. ` +
-        `Check discoverCourses for any goto() calls.`
+        `My Courses sidebar link not actionable after 25s. URL: ${currentUrl}. ` +
+        `Visible links: ${visibleLinks.slice(0, 20).join(' | ')}`
       );
     }
-
-    throw new Error(
-      `My Courses sidebar link not actionable after 15s. URL: ${currentUrl}. ` +
-      `Visible links: ${visibleLinks.slice(0, 20).join(' | ')}`
-    );
   }
 
   await page.waitForFunction(

@@ -16,6 +16,19 @@ const logger = require('../utils/logger');
 // }
 const jobs = new Map();
 
+// ─── Global concurrent job limit ─────────────────────────────────────────────
+// Caps the number of Playwright browsers that can run simultaneously.
+// Each browser consumes ~200–400 MB RAM; without this the server crashes under load.
+const MAX_CONCURRENT_JOBS = 3;
+
+function getRunningJobCount() {
+  let count = 0;
+  for (const job of jobs.values()) {
+    if (job.status === 'queued' || job.status === 'running') count++;
+  }
+  return count;
+}
+
 // ─── Measure 6: Per-matric concurrency lock ───────────────────────────────────
 // Tracks which matric numbers currently have an active bot job.
 // Prevents two simultaneous Playwright sessions for the same account.
@@ -252,4 +265,7 @@ module.exports = {
   isMatricActive,
   lockMatric,
   unlockMatric,
+  // Global capacity
+  MAX_CONCURRENT_JOBS,
+  getRunningJobCount,
 };
