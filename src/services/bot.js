@@ -7,6 +7,9 @@ const logger       = require('../utils/logger');
 
 const PORTAL_URL = 'https://bowenstudent.bowen.edu.ng/v2/dashboard2.php';
 
+// Maps jobId → masked matric so every logger call can include it automatically.
+const jobMatrics = new Map();
+
 const ALLOWED_DOMAINS = ['bowenstudent.bowen.edu.ng', 'bowen.edu.ng'];
 
 function isAllowedUrl(url) {
@@ -24,7 +27,7 @@ function isAllowedUrl(url) {
 function log(jobId, message, extra = {}) {
   const event = { type: 'log', message, timestamp: new Date().toISOString(), ...extra };
   jobManager.emit(jobId, event);
-  logger.info(message, { jobId, ...extra });
+  logger.info(message, { jobId, matric: jobMatrics.get(jobId),...extra });
 }
 
 function progress(jobId, completed, total, skipped) {
@@ -33,7 +36,7 @@ function progress(jobId, completed, total, skipped) {
 
 function fatalError(jobId, message, err) {
   jobManager.emit(jobId, { type: 'error', message, fatal: true, timestamp: new Date().toISOString() });
-  logger.error(message, { jobId, error: err?.message });
+  logger.error(message, { jobId, matric: jobMatrics.get(jobId), error: err?.message });
 }
 
 // ── Opt 4: Tiered delay configuration ─────────────────────────────────────────
@@ -101,7 +104,7 @@ async function selectCampus(page, campus, jobId) {
           .filter(o => o.value !== '' && o.value !== '0')
           .map(o => ({ value: o.value, text: o.textContent.trim() }))
       );
-      logger.info('Campus: native <select> options found', { jobId, options });
+      logger.info('Campus: native <select> options found', { jobId, matric: jobMatrics.get(jobId),options });
       const campusLower = campus.toLowerCase();
       const match = options.find(o =>
         o.text.toLowerCase().includes(campusLower) ||
@@ -113,16 +116,16 @@ async function selectCampus(page, campus, jobId) {
           `Available options: ${options.map(o => `"${o.text}"`).join(', ')}`
         );
       }
-      logger.info('Campus: strategy 1 — native <select>', { jobId, matched: match.text });
+      logger.info('Campus: strategy 1 — native <select>', { jobId, matric: jobMatrics.get(jobId),matched: match.text });
       await page.selectOption('select[name="campus"], select', { value: match.value });
       return 'native-select';
     }
-    logger.debug('Campus: native <select> exists but is hidden — trying library strategies', { jobId });
+    logger.debug('Campus: native <select> exists but is hidden — trying library strategies', { jobId, matric: jobMatrics.get(jobId) });
   }
 
   const select2Container = await page.$('.select2-container, .select2-selection').catch(() => null);
   if (select2Container && await select2Container.isVisible().catch(() => false)) {
-    logger.info('Campus: strategy 2 — Select2', { jobId });
+    logger.info('Campus: strategy 2 — Select2', { jobId, matric: jobMatrics.get(jobId) });
     await select2Container.click();
     await page.waitForSelector('.select2-results__option, .select2-dropdown', { timeout: 5000 });
     await page.click(`.select2-results__option:has-text("${campus}")`);
@@ -131,7 +134,7 @@ async function selectCampus(page, campus, jobId) {
 
   const chosenContainer = await page.$('.chosen-container').catch(() => null);
   if (chosenContainer && await chosenContainer.isVisible().catch(() => false)) {
-    logger.info('Campus: strategy 3 — Chosen.js', { jobId });
+    logger.info('Campus: strategy 3 — Chosen.js', { jobId, matric: jobMatrics.get(jobId) });
     await chosenContainer.click();
     await page.waitForSelector('.chosen-results', { timeout: 5000 });
     await page.click(`.chosen-results li:has-text("${campus}")`);
@@ -142,7 +145,7 @@ async function selectCampus(page, campus, jobId) {
     '[id*="campus" i], [name*="campus" i], [class*="campus" i], [placeholder*="campus" i]'
   ).catch(() => null);
   if (genericTrigger && await genericTrigger.isVisible().catch(() => false)) {
-    logger.info('Campus: strategy 4 — generic attribute match', { jobId });
+    logger.info('Campus: strategy 4 — generic attribute match', { jobId, matric: jobMatrics.get(jobId) });
     await genericTrigger.click();
     await page.waitForSelector(
       `[role="option"]:has-text("${campus}"), li:has-text("${campus}"), option:has-text("${campus}")`,
@@ -227,16 +230,16 @@ async function handleLogin(page, credentials, jobId) {
     Array.from(document.querySelectorAll('input[type="hidden"]'))
       .map(el => ({ name: el.name || '(none)', value: el.value || '', id: el.id || '' }))
   );
-  logger.info('Login form hidden fields', { jobId, count: hiddenFields.length, fields: hiddenFields });
+  logger.info('Login form hidden fields', { jobId, matric: jobMatrics.get(jobId),count: hiddenFields.length, fields: hiddenFields });
 
   const ROLE_KEYWORDS = ['role', 'user_type', 'login_type', 'type', 'usertype'];
   const roleFields = hiddenFields.filter(f =>
     ROLE_KEYWORDS.some(kw => f.name.toLowerCase().includes(kw))
   );
   if (roleFields.length > 0) {
-    logger.info('Role-related hidden fields found', { jobId, roleFields });
+    logger.info('Role-related hidden fields found', { jobId, matric: jobMatrics.get(jobId),roleFields });
   } else {
-    logger.info('No role-related hidden fields detected in login form', { jobId });
+    logger.info('No role-related hidden fields detected in login form', { jobId, matric: jobMatrics.get(jobId) });
   }
   // ── End Fix 1 ─────────────────────────────────────────────────────────────────
 
@@ -250,9 +253,9 @@ async function handleLogin(page, credentials, jobId) {
 
   if (campusFieldExists) {
     const strategyUsed = await selectCampus(page, credentials.campus, jobId);
-    logger.info('Campus selected', { jobId, strategy: strategyUsed, campus: credentials.campus });
+    logger.info('Campus selected', { jobId, matric: jobMatrics.get(jobId),strategy: strategyUsed, campus: credentials.campus });
   } else {
-    logger.info('Campus field not present — skipping (portal auto-detects from matric)', { jobId });
+    logger.info('Campus field not present — skipping (portal auto-detects from matric)', { jobId, matric: jobMatrics.get(jobId) });
   }
 
   // ── Fix 2: intercept the login POST to log what the server actually receives ──
@@ -269,14 +272,14 @@ async function handleLogin(page, credentials, jobId) {
         .replace(/password=[^&]*/gi, 'password=***')
         .replace(/pass=[^&]*/gi,     'pass=***')
         .replace(/pwd=[^&]*/gi,      'pwd=***');
-      logger.info('Login POST data sent to portal', { jobId, data: masked });
+      logger.info('Login POST data sent to portal', { jobId, matric: jobMatrics.get(jobId),data: masked });
     }
   };
   page.on('request', loginPostHandler);
   // ── End Fix 2 setup ───────────────────────────────────────────────────────────
 
   const btnUsed = await clickLoginButton(page);
-  logger.info('Login button clicked', { jobId, selector: btnUsed });
+  logger.info('Login button clicked', { jobId, matric: jobMatrics.get(jobId),selector: btnUsed });
 
   const DASHBOARD_SELECTOR = 'a:has-text("My Courses")';
   const ERROR_SELECTOR     = '.alert-danger, .alert-warning, .login-error, #login-error';
@@ -309,7 +312,7 @@ async function handleLogin(page, credentials, jobId) {
     if (stillOnLoginPage) {
       const pageUrl  = page.url();
       const bodyText = await page.evaluate(() => document.body.innerText.slice(0, 300)).catch(() => '');
-      logger.warn('Login form visible after 60s', { jobId, url: pageUrl, body: bodyText });
+      logger.warn('Login form visible after 60s', { jobId, matric: jobMatrics.get(jobId),url: pageUrl, body: bodyText });
       return {
         result: 'failure',
         errorText: `Login form still visible after 60s — portal did not process the submission. ` +
@@ -323,27 +326,27 @@ async function handleLogin(page, credentials, jobId) {
       'a:has-text("Student Portal"), button:has-text("Student Portal")'
     ).first();
     if (await studentBtn2.isVisible({ timeout: 3000 }).catch(() => false)) {
-      logger.info('Role-selection page after 60s — clicking Student Login', { jobId });
+      logger.info('Role-selection page after 60s — clicking Student Login', { jobId, matric: jobMatrics.get(jobId) });
       await studentBtn2.click();
       await page.waitForSelector('a:has-text("My Courses")', { timeout: 30000 });
       return { result: 'success' };
     }
 
     const pageUrl = page.url();
-    logger.warn('Login timed out after 60s', { jobId, url: pageUrl });
+    logger.warn('Login timed out after 60s', { jobId, matric: jobMatrics.get(jobId),url: pageUrl });
 
     if (pageUrl.includes('index.php')) {
       const hasMyCoursesNow = await page.$('a:has-text("My Courses")')
         .then(el => !!el).catch(() => false);
       if (hasMyCoursesNow) {
-        logger.info('My Courses found at index.php after 60s timeout — proceeding', { jobId });
+        logger.info('My Courses found at index.php after 60s timeout — proceeding', { jobId, matric: jobMatrics.get(jobId) });
         return { result: 'success' };
       }
       const isRolePage = await page.$(
         'a:has-text("Student Login"), button:has-text("Student Login")'
       ).then(el => !!el).catch(() => false);
       if (isRolePage) {
-        logger.info('Role-selection page after 60s timeout — parent session', { jobId, url: pageUrl });
+        logger.info('Role-selection page after 60s timeout — parent session', { jobId, matric: jobMatrics.get(jobId),url: pageUrl });
         return { result: 'parent-session' };
       }
       return {
@@ -373,7 +376,7 @@ async function handleLogin(page, credentials, jobId) {
       .then(el => !!el).catch(() => false);
 
     if (alreadyOnStudentDash) {
-      logger.info('Login succeeded — student dashboard at index.php', { jobId, url: currentUrl });
+      logger.info('Login succeeded — student dashboard at index.php', { jobId, matric: jobMatrics.get(jobId),url: currentUrl });
       return { result: 'success' };
     }
 
@@ -385,16 +388,16 @@ async function handleLogin(page, credentials, jobId) {
     ).catch(() => null);
 
     if (studentEntryEl) {
-      logger.info('Role-selection page at index.php — clicking Student Login to complete login', { jobId });
+      logger.info('Role-selection page at index.php — clicking Student Login to complete login', { jobId, matric: jobMatrics.get(jobId) });
       log(jobId, '🖱️  Entering student portal…', { status: 'info' });
       await studentEntryEl.click({ force: true });
       await page.waitForSelector('a:has-text("My Courses")', { timeout: 30000 }).catch(() => null);
-      logger.info('Student portal entered after role-selection click', { jobId, url: page.url() });
+      logger.info('Student portal entered after role-selection click', { jobId, matric: jobMatrics.get(jobId),url: page.url() });
       return { result: 'success' };
     }
 
     // No student dashboard and no role-selection link — session assigned parent role.
-    logger.info('index.php has no My Courses and no Student Login link — parent session', { jobId });
+    logger.info('index.php has no My Courses and no Student Login link — parent session', { jobId, matric: jobMatrics.get(jobId) });
     return { result: 'parent-session' };
   }
 
@@ -411,7 +414,7 @@ async function dismissDashboardModal(page, jobId) {
   if (!modalVisible) return;
 
   const modalText = await page.textContent(MODAL_SEL).catch(() => '');
-  logger.info('Dashboard modal detected', { jobId, text: modalText.trim().slice(0, 80) });
+  logger.info('Dashboard modal detected', { jobId, matric: jobMatrics.get(jobId),text: modalText.trim().slice(0, 80) });
   log(jobId, '🪟 Dashboard modal detected — closing…', { status: 'info' });
 
   const CLOSE_CANDIDATES = [
@@ -432,7 +435,7 @@ async function dismissDashboardModal(page, jobId) {
     if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
       await btn.click();
       closed = true;
-      logger.info('Modal closed', { jobId, selector: sel });
+      logger.info('Modal closed', { jobId, matric: jobMatrics.get(jobId),selector: sel });
       break;
     }
   }
@@ -444,10 +447,10 @@ async function dismissDashboardModal(page, jobId) {
     if (await anyModalBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
       await anyModalBtn.click({ force: true });
       closed = true;
-      logger.warn('Fallback: force-clicked first button inside modal', { jobId });
+      logger.warn('Fallback: force-clicked first button inside modal', { jobId, matric: jobMatrics.get(jobId) });
     } else {
       await page.keyboard.press('Escape');
-      logger.warn('Modal close button not found — pressed Escape', { jobId });
+      logger.warn('Modal close button not found — pressed Escape', { jobId, matric: jobMatrics.get(jobId) });
     }
   }
 
@@ -472,20 +475,20 @@ async function discoverCourses(page, jobId) {
     return backdrops.length;
   }).catch(() => 0);
   if (backdropsRemoved > 0) {
-    logger.info('Removed lingering modal backdrops', { jobId, count: backdropsRemoved });
+    logger.info('Removed lingering modal backdrops', { jobId, matric: jobMatrics.get(jobId),count: backdropsRemoved });
   }
 
   // page.goto() is NEVER called here — all navigation is through link clicks only.
   try {
     await page.locator('a:has-text("My Courses")').first().click({ timeout: 15000 });
-    logger.info('My Courses link clicked', { jobId });
+    logger.info('My Courses link clicked', { jobId, matric: jobMatrics.get(jobId) });
   } catch (_firstErr) {
     // Element visible but still intercepted — force-click dispatches directly at the
     // element's coordinates, bypassing the actionability/interception check.
-    logger.warn('My Courses not actionable — retrying with force:true', { jobId });
+    logger.warn('My Courses not actionable — retrying with force:true', { jobId, matric: jobMatrics.get(jobId) });
     try {
       await page.locator('a:has-text("My Courses")').first().click({ force: true, timeout: 10000 });
-      logger.info('My Courses link clicked (force)', { jobId });
+      logger.info('My Courses link clicked (force)', { jobId, matric: jobMatrics.get(jobId) });
     } catch (err) {
       const currentUrl   = page.url();
       const visibleLinks = await page.$$eval('a', els =>
@@ -552,7 +555,7 @@ async function discoverCourses(page, jobId) {
   const taggedCount = allCourses.filter(c => c.semester !== null).length;
 
   if (taggedCount === 0 && allCourses.length > 0) {
-    logger.warn('Semester DOM tagging found no headings — processing all courses as fallback', { jobId });
+    logger.warn('Semester DOM tagging found no headings — processing all courses as fallback', { jobId, matric: jobMatrics.get(jobId) });
     return allCourses;
   }
 
@@ -585,7 +588,7 @@ async function navigateToCourse(page, context, courseCode, jobId) {
     .isVisible({ timeout: 3000 }).catch(() => false);
 
   if (!sidebarPresent) {
-    logger.info('Sidebar not visible — returning to dashboard', { jobId, courseCode });
+    logger.info('Sidebar not visible — returning to dashboard', { jobId, matric: jobMatrics.get(jobId),courseCode });
     await page.goto(PORTAL_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForLoadState('domcontentloaded', { timeout: 15000 });
   }
@@ -645,7 +648,7 @@ async function navigateToCourse(page, context, courseCode, jobId) {
     page.click(assessmentSel),
   ]);
 
-  logger.info('Assessment link clicked', { jobId, courseCode, selector: assessmentSel });
+  logger.info('Assessment link clicked', { jobId, matric: jobMatrics.get(jobId),courseCode, selector: assessmentSel });
 
   let assessmentPage;
   let isNewTab = false;
@@ -653,13 +656,13 @@ async function navigateToCourse(page, context, courseCode, jobId) {
   if (newTabPage) {
     assessmentPage = newTabPage;
     isNewTab = true;
-    logger.info('Assessment list opened in new tab', { jobId, courseCode, url: assessmentPage.url() });
+    logger.info('Assessment list opened in new tab', { jobId, matric: jobMatrics.get(jobId),courseCode, url: assessmentPage.url() });
     await assessmentPage.waitForSelector(
       'td button:has-text("Assess"), td a:has-text("Assess"), td:has-text("Assessed")',
       { timeout: 35000 }
     );
   } else {
-    logger.info('No new tab from Assessment link — using current page', { jobId, courseCode });
+    logger.info('No new tab from Assessment link — using current page', { jobId, matric: jobMatrics.get(jobId),courseCode });
     assessmentPage = page;
     await assessmentPage.waitForSelector(
       'td button:has-text("Assess"), td a:has-text("Assess"), td:has-text("Assessed")',
@@ -680,6 +683,7 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
   // If you need to navigate somewhere, find the link on the current page and click it.
 
   const matricForLock = credentials.matricNumber;
+  jobMatrics.set(jobId, logger.maskMatric(credentials.matricNumber));
 
   let browser     = null;
   let jobTimedOut = false;
@@ -695,7 +699,7 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
   const JOB_TIMEOUT_MS = 20 * 60 * 1000;
   const jobTimeout = setTimeout(async () => {
     jobTimedOut = true;
-    logger.error('Job timeout — killing browser after 20 minutes', { jobId });
+    logger.error('Job timeout — killing browser after 20 minutes', { jobId, matric: jobMatrics.get(jobId) });
     fatalError(jobId,
       '❌ Job timed out after 20 minutes. The portal may be unresponsive — please try again later.'
     );
@@ -731,7 +735,7 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
         if (frame.parentFrame() !== null) return;
         const url = frame.url();
         if (isAllowedUrl(url)) return;
-        logger.error('URL whitelist violation — killing job immediately', { jobId, url });
+        logger.error('URL whitelist violation — killing job immediately', { jobId, matric: jobMatrics.get(jobId),url });
         fatalError(jobId,
           `❌ Security: bot navigated to an unauthorized domain and was stopped. URL: ${url}`
         );
@@ -887,14 +891,14 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
           if (newFormPage) {
             assessPage   = newFormPage;
             isFormNewTab = true;
-            logger.info('Assessment form opened in new tab', { jobId, courseCode: course.code });
+            logger.info('Assessment form opened in new tab', { jobId, matric: jobMatrics.get(jobId),courseCode: course.code });
             await assessPage.waitForSelector(
               'button:has-text("Next"), input[value="Next"], a:has-text("Next"), input[type="radio"]',
               { timeout: 20000 }
             ).catch(() => null);
           } else {
             assessPage = assessmentPage;
-            logger.info('No new tab — form on same page', { jobId, courseCode: course.code });
+            logger.info('No new tab — form on same page', { jobId, matric: jobMatrics.get(jobId),courseCode: course.code });
             await assessPage.waitForSelector(
               'button:has-text("Next"), input[value="Next"], a:has-text("Next"), input[type="radio"]',
               { timeout: 20000 }
@@ -941,7 +945,7 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
               }, [groupName, targetRating]);
 
               if (!selected) {
-                logger.warn('Radio option not found for group', { jobId, group: groupName, targetRating });
+                logger.warn('Radio option not found for group', { jobId, matric: jobMatrics.get(jobId),group: groupName, targetRating });
               }
             }
 
@@ -960,7 +964,7 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
               let dialogMessage = '';
               const dialogHandler = async (dialog) => {
                 dialogMessage = dialog.message();
-                logger.info('Assessment form dialog', { jobId, message: dialogMessage });
+                logger.info('Assessment form dialog', { jobId, matric: jobMatrics.get(jobId),message: dialogMessage });
                 await dialog.accept();
               };
               assessPage.on('dialog', dialogHandler);
@@ -1011,9 +1015,9 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
                 if (/error|incomplete|invalid/i.test(dialogMessage)) {
                   throw new Error(`Form validation error: ${dialogMessage}`);
                 }
-                logger.info('Success confirmed via dialog', { jobId, dialog: dialogMessage });
+                logger.info('Success confirmed via dialog', { jobId, matric: jobMatrics.get(jobId),dialog: dialogMessage });
               } else {
-                logger.warn('No success signal detected after submit — proceeding', { jobId, courseCode: course.code });
+                logger.warn('No success signal detected after submit — proceeding', { jobId, matric: jobMatrics.get(jobId),courseCode: course.code });
               }
 
             } else {
@@ -1055,7 +1059,7 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
             `⏳ ${course.code} — navigation error, queued for end-of-run retry`,
             { status: 'info', courseCode: course.code }
           );
-          logger.warn('Course queued for retry', { jobId, course: course.code, error: courseErr.message });
+          logger.warn('Course queued for retry', { jobId, matric: jobMatrics.get(jobId),course: course.code, error: courseErr.message });
         } else {
           failed++;
           consecutiveFails++;
@@ -1125,7 +1129,7 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
       try {
         await Run.findOneAndUpdate({ jobId }, { runCompleted: true, completedAt: new Date(), summary });
       } catch (dbErr) {
-        logger.warn('Failed to update Run record on completion', { jobId, error: dbErr.message });
+        logger.warn('Failed to update Run record on completion', { jobId, matric: jobMatrics.get(jobId), error: dbErr.message });
       }
     }
 
@@ -1153,11 +1157,12 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
 
     if (browser) {
       await browser.close().catch(err =>
-        logger.warn('Error closing browser during cleanup', { jobId, error: err.message })
+        logger.warn('Error closing browser during cleanup', { jobId, matric: jobMatrics.get(jobId), error: err.message })
       );
     }
     jobManager.setJobStatus(jobId, 'done');
-    logger.info('Bot run finished — browser closed, credentials cleared', { jobId });
+    logger.info('Bot run finished — browser closed, credentials cleared', { jobId, matric: jobMatrics.get(jobId) });
+    jobMatrics.delete(jobId);
   }
 }
 
