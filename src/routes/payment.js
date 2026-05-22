@@ -51,6 +51,15 @@ router.post('/initiate', initLimiter, async (req, res) => {
   const email    = providedEmail?.trim() || matricToEmail(matric);
 
   try {
+    // If the student already paid this semester but closed the site before running the bot,
+    // their paymentRef is gone from React state. Return alreadyPaid so the frontend skips
+    // the payment screen and sends them straight to /configure.
+    const paidRun = await Run.findOne({ matricNumber: matric, semester, paid: true, runCompleted: false });
+    if (paidRun) {
+      logger.info('Payment initiate: already paid, skipping Paystack', { matric, semester });
+      return res.status(200).json({ alreadyPaid: true });
+    }
+
     // Idempotency: if there's already an unpaid run for this semester, reuse it.
     // This handles the case where the student clicks "Continue to Payment" twice.
     let run = await Run.findOne({ matricNumber: matric, semester, paid: false, runCompleted: false });
