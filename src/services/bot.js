@@ -895,9 +895,17 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
         }
 
         while (true) {
-          const assessBtn    = assessmentPage.locator(ASSESS_SELECTOR).first();
-          const stillVisible = await assessBtn.isVisible({ timeout: 5000 }).catch(() => false);
-          if (!stillVisible) break;
+          // After a form submission the portal does an AJAX update that can briefly
+          // hide all Assess buttons. Wait up to 15 s for at least one to reappear
+          // before falling back to a DOM count (catches paginated rows too).
+          const stillVisible = await assessmentPage
+            .locator(ASSESS_SELECTOR).first()
+            .isVisible({ timeout: 15000 }).catch(() => false);
+          const domCount = stillVisible ? 1
+            : await assessmentPage.locator(ASSESS_SELECTOR).count();
+          if (!stillVisible && domCount === 0) break;
+
+          const assessBtn = assessmentPage.locator(ASSESS_SELECTOR).first();
 
           const [newFormPage] = await Promise.all([
             context.waitForEvent('page', { timeout: 12000 }).catch(() => null),
@@ -924,6 +932,7 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
             ).catch(() => null);
           }
 
+          let submissionVerified = false;
           try {
             // When the form opens as a modal on the same page, document.querySelector('form')
             // returns the FIRST form in the DOM — which may be a background list/filter form,
@@ -931,6 +940,7 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
             const MODAL_SEL = '.modal.show, .modal.in, [role="dialog"].show';
             const isModal = await assessPage.locator(MODAL_SEL).first()
               .isVisible({ timeout: 3000 }).catch(() => false);
+            logger.info('Form mode detected', { jobId, matric: jobMatrics.get(jobId), courseCode: course.code, isModal });
             const formRoot = isModal
               ? assessPage.locator(MODAL_SEL).first()
               : assessPage;
@@ -1053,16 +1063,22 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
                   { state: 'hidden', timeout: 5000 }
                 ).catch(() => null);
                 await randomDelay('afterClose');
+                submissionVerified = true;
               } else if (dialogMessage) {
                 if (/error|incomplete|invalid/i.test(dialogMessage)) {
                   throw new Error(`Form validation error: ${dialogMessage}`);
                 }
-                logger.info('Success confirmed via dialog', { jobId, matric: jobMatrics.get(jobId),dialog: dialogMessage });
+                logger.info('Success confirmed via dialog', { jobId, matric: jobMatrics.get(jobId), dialog: dialogMessage });
+                submissionVerified = true;
               } else {
-                logger.warn('No success signal detected after submit — proceeding', { jobId, matric: jobMatrics.get(jobId),courseCode: course.code });
+                log(jobId,
+                  `⚠️ ${course.code} — no success signal after submit (portal may not have saved)`,
+                  { status: 'warn', courseCode: course.code }
+                );
               }
 
             } else {
+              submissionVerified = true; // dry run counts as verified
               log(jobId,
                 `🔍 DRY RUN — Would submit ${course.code} with rating ${targetRating} — skipped`,
                 { status: 'info', courseCode: course.code, dryRun: true }
@@ -1075,9 +1091,15 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
             }
           }
 
-          log(jobId, `✅ ${course.code} — one assessment row complete`, {
-            status: 'complete', courseCode: course.code,
-          });
+          if (submissionVerified) {
+            log(jobId, `✅ ${course.code} — one assessment row complete`, {
+              status: 'complete', courseCode: course.code,
+            });
+          } else {
+            log(jobId, `⚠️ ${course.code} — submission unconfirmed, will retry remaining students`, {
+              status: 'warn', courseCode: course.code,
+            });
+          }
 
           if (dryRun) break;
 
