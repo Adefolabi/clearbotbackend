@@ -934,27 +934,31 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
 
           let submissionVerified = false;
           try {
-            // When the form opens as a modal on the same page, document.querySelector('form')
-            // returns the FIRST form in the DOM — which may be a background list/filter form,
-            // not the modal. Detect the visible modal and scope all operations to it.
+            // Wait for radio buttons to appear anywhere on the page first,
+            // then walk up the DOM to find their containing form.
+            // This is more reliable than detecting a modal by CSS class, because the
+            // portal may use non-standard modal markup for some courses.
+            await assessPage.locator('input[type="radio"]').first()
+              .waitFor({ state: 'attached', timeout: 15000 });
+
+            // Detect modal only to scope the Next-button lookup (not the form).
             const MODAL_SEL = '.modal.show, .modal.in, [role="dialog"].show';
             const isModal = await assessPage.locator(MODAL_SEL).first()
-              .isVisible({ timeout: 3000 }).catch(() => false);
+              .isVisible({ timeout: 1000 }).catch(() => false);
             logger.info('Form mode detected', { jobId, matric: jobMatrics.get(jobId), courseCode: course.code, isModal });
-            const formRoot = isModal
-              ? assessPage.locator(MODAL_SEL).first()
-              : assessPage;
 
+            const formRoot = isModal ? assessPage.locator(MODAL_SEL).first() : assessPage;
             const nextBtn = formRoot
               .locator('button:has-text("Next"), input[value="Next"], a:has-text("Next")')
               .first();
             const hasNextBtn = await nextBtn.waitFor({ state: 'attached', timeout: 3000 })
               .then(() => true).catch(() => false);
-            if (hasNextBtn) await nextBtn.click();
-
-            const assessForm = formRoot.locator('form').first();
-            await assessForm.locator('input[type="radio"]').first()
-              .waitFor({ state: 'attached', timeout: 10000 });
+            if (hasNextBtn) {
+              await nextBtn.click();
+              // Wait for the next page of the form to load its radio buttons.
+              await assessPage.locator('input[type="radio"]').first()
+                .waitFor({ state: 'attached', timeout: 10000 });
+            }
 
             await assertIsAssessmentPage(assessPage);
 
@@ -962,8 +966,13 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
               ratings.perCourseRatings?.[course.code] ?? ratings.defaultRating
             ).toString();
 
-            // Obtain a stable DOM handle so all evaluate() calls operate on the same form.
-            const formHandle = await assessForm.elementHandle();
+            // Walk up from the first radio button to its containing form.
+            // This guarantees we target the form that actually has the questions,
+            // regardless of whether it's a modal, inline, or any other structure.
+            const formHandle = await assessPage.evaluateHandle(() => {
+              const radio = document.querySelector('input[type="radio"]');
+              return radio ? (radio.closest('form') || document.body) : document.body;
+            });
 
             const groupNames = await assessPage.evaluate(formEl => {
               const inputs = Array.from(formEl.querySelectorAll('input[type="radio"]'));
@@ -1104,6 +1113,18 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
           if (dryRun) break;
 
           await randomDelay('betweenCourses');
+        }
+
+        // Verify the loop didn't exit while Assess buttons were still present in the DOM.
+        // This catches cases where isVisible returned false mid-AJAX-update.
+        const leftover = await assessmentPage.locator(ASSESS_SELECTOR).count();
+        if (leftover > 0 && !inRetryPass) {
+          log(jobId, `⚠️ ${course.code} — loop exited with ${leftover} student(s) still pending, queuing for retry`, {
+            status: 'warn', courseCode: course.code, leftover,
+          });
+          retryQueue.push(course);
+          consecutiveFails = 0;
+          return;
         }
 
         completed++;
