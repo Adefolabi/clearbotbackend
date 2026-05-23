@@ -76,7 +76,6 @@ router.post('/start', startRateLimiter, async (req, res) => {
       matricNumber: matricNumber.toUpperCase(),
       semester,
       paid:         true,
-      runCompleted: false,
     });
 
     if (!paymentRecord) {

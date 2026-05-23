@@ -861,12 +861,31 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
 
         await assertIsCourseAssessmentPage(assessmentPage);
 
-        const firstAssessBtn = assessmentPage.locator(ASSESS_SELECTOR).first();
-        const hasPending     = await firstAssessBtn.isVisible({ timeout: 5000 }).catch(() => false);
+        // count() finds buttons anywhere in the DOM, including paginated rows not yet visible.
+        // isVisible() alone returns false for off-viewport or paginated buttons (false skip).
+        let pendingCount = await assessmentPage.locator(ASSESS_SELECTOR).count();
+
+        if (pendingCount === 0) {
+          // Broader fallback: Assess button/link not necessarily inside a <td>
+          const broadCount = await assessmentPage
+            .locator('button:has-text("Assess"), a:has-text("Assess")')
+            .count();
+          if (broadCount > 0) {
+            logger.warn(`${course.code} — ${broadCount} Assess button(s) found outside <td>, proceeding`, {
+              jobId, matric: jobMatrics.get(jobId), courseCode: course.code,
+            });
+            pendingCount = broadCount;
+          }
+        }
+
+        const hasPending = pendingCount > 0;
 
         if (!hasPending) {
+          const assessedCount = await assessmentPage.locator('td:has-text("Assessed")').count();
           log(jobId, `⏭️  ${course.code} — already assessed, skipping`, {
             status: 'skipped', courseCode: course.code,
+            assessedRowCount: assessedCount,
+            pageUrl: assessmentPage.url(),
           });
           skipped++;
           consecutiveFails = 0;
@@ -906,15 +925,24 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
           }
 
           try {
-            const formContainer = assessPage.locator('form, [class*="assess"], main, #content').first();
-            const nextBtn = formContainer
+            // When the form opens as a modal on the same page, document.querySelector('form')
+            // returns the FIRST form in the DOM — which may be a background list/filter form,
+            // not the modal. Detect the visible modal and scope all operations to it.
+            const MODAL_SEL = '.modal.show, .modal.in, [role="dialog"].show';
+            const isModal = await assessPage.locator(MODAL_SEL).first()
+              .isVisible({ timeout: 3000 }).catch(() => false);
+            const formRoot = isModal
+              ? assessPage.locator(MODAL_SEL).first()
+              : assessPage;
+
+            const nextBtn = formRoot
               .locator('button:has-text("Next"), input[value="Next"], a:has-text("Next")')
               .first();
             const hasNextBtn = await nextBtn.waitFor({ state: 'attached', timeout: 3000 })
               .then(() => true).catch(() => false);
             if (hasNextBtn) await nextBtn.click();
 
-            const assessForm = assessPage.locator('form').first();
+            const assessForm = formRoot.locator('form').first();
             await assessForm.locator('input[type="radio"]').first()
               .waitFor({ state: 'attached', timeout: 10000 });
 
@@ -924,16 +952,22 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
               ratings.perCourseRatings?.[course.code] ?? ratings.defaultRating
             ).toString();
 
-            const groupNames = await assessPage.evaluate(() => {
-              const form   = document.querySelector('form') || document;
-              const inputs = Array.from(form.querySelectorAll('input[type="radio"]'));
+            // Obtain a stable DOM handle so all evaluate() calls operate on the same form.
+            const formHandle = await assessForm.elementHandle();
+
+            const groupNames = await assessPage.evaluate(formEl => {
+              const inputs = Array.from(formEl.querySelectorAll('input[type="radio"]'));
               return [...new Set(inputs.map(i => i.name))].filter(Boolean);
+            }, formHandle);
+
+            log(jobId, `📝 ${course.code} — ${groupNames.length} question(s), rating ${targetRating}`, {
+              status: 'info', courseCode: course.code,
             });
 
+            let missingGroups = 0;
             for (const groupName of groupNames) {
-              const selected = await assessPage.evaluate(([name, value]) => {
-                const form  = document.querySelector('form') || document;
-                const radio = form.querySelector(
+              const selected = await assessPage.evaluate(([formEl, name, value]) => {
+                const radio = formEl.querySelector(
                   `input[type="radio"][name="${name}"][value="${value}"]`
                 );
                 if (!radio) return false;
@@ -942,42 +976,50 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
                 radio.dispatchEvent(new Event('change', { bubbles: true }));
                 radio.dispatchEvent(new Event('input',  { bubbles: true }));
                 return true;
-              }, [groupName, targetRating]);
+              }, [formHandle, groupName, targetRating]);
 
               if (!selected) {
-                logger.warn('Radio option not found for group', { jobId, matric: jobMatrics.get(jobId),group: groupName, targetRating });
+                missingGroups++;
+                logger.warn('Radio option not found for group', { jobId, matric: jobMatrics.get(jobId), group: groupName, targetRating });
               }
             }
 
-            await assessPage.evaluate(() => {
-              const form = document.querySelector('form') || document;
-              form.querySelectorAll('textarea').forEach(ta => {
+            if (missingGroups > 0) {
+              log(jobId,
+                `⚠️ ${course.code} — ${missingGroups}/${groupNames.length} question(s) had no option for rating "${targetRating}"`,
+                { status: 'warn', courseCode: course.code }
+              );
+            }
+
+            await assessPage.evaluate(formEl => {
+              formEl.querySelectorAll('textarea').forEach(ta => {
                 if (!ta.value.trim()) {
                   ta.value = 'Satisfactory';
                   ta.dispatchEvent(new Event('input',  { bubbles: true }));
                   ta.dispatchEvent(new Event('change', { bubbles: true }));
                 }
               });
-            });
+            }, formHandle);
 
             if (!dryRun) {
               let dialogMessage = '';
               const dialogHandler = async (dialog) => {
                 dialogMessage = dialog.message();
-                logger.info('Assessment form dialog', { jobId, matric: jobMatrics.get(jobId),message: dialogMessage });
+                logger.info('Assessment form dialog', { jobId, matric: jobMatrics.get(jobId), message: dialogMessage });
                 await dialog.accept();
               };
               assessPage.on('dialog', dialogHandler);
 
-              const submitClicked = await assessPage.evaluate(() => {
-                const form = document.querySelector('form') || document;
-                const btn  =
-                  form.querySelector('button[name="submitassessment"]') ||
-                  Array.from(form.querySelectorAll('button, input[type="submit"]'))
+              const submitClicked = await assessPage.evaluate(formEl => {
+                const btn =
+                  formEl.querySelector('button[name="submitassessment"]') ||
+                  Array.from(formEl.querySelectorAll('button, input[type="submit"]'))
                     .find(el => (el.textContent || el.value || '').trim().toLowerCase() === 'submit');
                 if (btn) { btn.click(); return true; }
                 return false;
-              });
+              }, formHandle);
+
+              await formHandle.dispose();
 
               if (!submitClicked) {
                 throw new Error('Submit button not found in DOM after answering all questions.');
