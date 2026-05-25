@@ -523,7 +523,8 @@ async function discoverCourses(page, jobId) {
   const tagged = await page.evaluate(() => {
     const results  = [];
     let currentSem = null;
-    const COURSE_RE = /^[A-Z]{2,4}\s\d{3,4}$/;
+    // Matches standard codes ("ECO 304") and BUI-prefixed codes ("BUI-GEL 304", "BUI-ECO 326").
+    const COURSE_RE = /^[A-Z]{2,4}(?:-[A-Z]{2,4})?\s\d{3,4}$/;
 
     const container =
       document.querySelector('.collapse.show')                       ||
@@ -551,26 +552,9 @@ async function discoverCourses(page, jobId) {
     return true;
   });
 
-  const semLabel    = getCurrentSemester().split('_').pop();
-  const taggedCount = allCourses.filter(c => c.semester !== null).length;
-
-  if (taggedCount === 0 && allCourses.length > 0) {
-    logger.warn('Semester DOM tagging found no headings — processing all courses as fallback', { jobId, matric: jobMatrics.get(jobId) });
-    return allCourses;
-  }
-
-  const filtered    = allCourses.filter(c => c.semester === null || c.semester === semLabel);
-  const filteredOut = allCourses.length - filtered.length;
-
-  if (filteredOut > 0) {
-    log(jobId,
-      `📋 Found ${filtered.length} course(s) for ${semLabel} semester — ` +
-      `${filteredOut} from the other semester skipped`,
-      { status: 'info' }
-    );
-  }
-
-  return filtered;
+  // Process all courses regardless of semester — students may have pending assessments
+  // from any semester, and the per-course hasPending check skips already-assessed ones.
+  return allCourses;
 }
 
 // ─── Batch status pre-check (Opt 2) ──────────────────────────────────────────
@@ -861,20 +845,23 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
 
         await assertIsCourseAssessmentPage(assessmentPage);
 
+        const BROAD_ASSESS_SEL = 'button:has-text("Assess"), a:has-text("Assess")';
+
         // count() finds buttons anywhere in the DOM, including paginated rows not yet visible.
         // isVisible() alone returns false for off-viewport or paginated buttons (false skip).
         let pendingCount = await assessmentPage.locator(ASSESS_SELECTOR).count();
+        // useBroadSel: true when Assess buttons exist but aren't inside <td>.
+        // The while loop must use the same selector that found them.
+        let useBroadSel = false;
 
         if (pendingCount === 0) {
-          // Broader fallback: Assess button/link not necessarily inside a <td>
-          const broadCount = await assessmentPage
-            .locator('button:has-text("Assess"), a:has-text("Assess")')
-            .count();
+          const broadCount = await assessmentPage.locator(BROAD_ASSESS_SEL).count();
           if (broadCount > 0) {
             logger.warn(`${course.code} — ${broadCount} Assess button(s) found outside <td>, proceeding`, {
               jobId, matric: jobMatrics.get(jobId), courseCode: course.code,
             });
             pendingCount = broadCount;
+            useBroadSel  = true;
           }
         }
 
@@ -894,18 +881,21 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
           return;
         }
 
+        // Use whichever selector found the Assess buttons in the hasPending check.
+        const effectiveSel = useBroadSel ? BROAD_ASSESS_SEL : ASSESS_SELECTOR;
+
         while (true) {
           // After a form submission the portal does an AJAX update that can briefly
           // hide all Assess buttons. Wait up to 15 s for at least one to reappear
           // before falling back to a DOM count (catches paginated rows too).
           const stillVisible = await assessmentPage
-            .locator(ASSESS_SELECTOR).first()
+            .locator(effectiveSel).first()
             .isVisible({ timeout: 15000 }).catch(() => false);
           const domCount = stillVisible ? 1
-            : await assessmentPage.locator(ASSESS_SELECTOR).count();
+            : await assessmentPage.locator(effectiveSel).count();
           if (!stillVisible && domCount === 0) break;
 
-          const assessBtn = assessmentPage.locator(ASSESS_SELECTOR).first();
+          const assessBtn = assessmentPage.locator(effectiveSel).first();
 
           const [newFormPage] = await Promise.all([
             context.waitForEvent('page', { timeout: 12000 }).catch(() => null),
@@ -1117,7 +1107,7 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
 
         // Verify the loop didn't exit while Assess buttons were still present in the DOM.
         // This catches cases where isVisible returned false mid-AJAX-update.
-        const leftover = await assessmentPage.locator(ASSESS_SELECTOR).count();
+        const leftover = await assessmentPage.locator(effectiveSel).count();
         if (leftover > 0 && !inRetryPass) {
           log(jobId, `⚠️ ${course.code} — loop exited with ${leftover} student(s) still pending, queuing for retry`, {
             status: 'warn', courseCode: course.code, leftover,
