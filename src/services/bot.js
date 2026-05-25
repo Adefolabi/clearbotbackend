@@ -845,7 +845,9 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
 
         await assertIsCourseAssessmentPage(assessmentPage);
 
-        const BROAD_ASSESS_SEL = 'button:has-text("Assess"), a:has-text("Assess")';
+        // Exclude .dropdown-item — navigation menus can contain "Assess" links (e.g. Google Forms)
+        // that are not actual student row assess buttons and are never visible for clicking.
+        const BROAD_ASSESS_SEL = 'button:has-text("Assess"):not(.dropdown-item), a:has-text("Assess"):not(.dropdown-item)';
 
         // count() finds buttons anywhere in the DOM, including paginated rows not yet visible.
         // isVisible() alone returns false for off-viewport or paginated buttons (false skip).
