@@ -448,10 +448,23 @@ async function dismissDashboardModal(page, jobId) {
       await anyModalBtn.click({ force: true });
       closed = true;
       logger.warn('Fallback: force-clicked first button inside modal', { jobId, matric: jobMatrics.get(jobId) });
-    } else {
-      await page.keyboard.press('Escape');
-      logger.warn('Modal close button not found — pressed Escape', { jobId, matric: jobMatrics.get(jobId) });
     }
+  }
+
+  if (!closed) {
+    // JS force-close — handles modals like #pendingRegModal that ignore Escape and have no visible close button.
+    await page.evaluate(() => {
+      for (const el of document.querySelectorAll('.modal.show, .modal.fade.show, .modal.in, [aria-modal="true"]')) {
+        el.classList.remove('show', 'in');
+        el.setAttribute('aria-hidden', 'true');
+        el.style.display = 'none';
+      }
+      document.querySelectorAll('.modal-backdrop').forEach(b => b.remove());
+      document.body.classList.remove('modal-open');
+      document.body.style.removeProperty('overflow');
+      document.body.style.removeProperty('padding-right');
+    }).catch(() => null);
+    logger.warn('Force-closed modal(s) via JS', { jobId, matric: jobMatrics.get(jobId) });
   }
 
   await page.waitForSelector(MODAL_SEL, { state: 'hidden', timeout: 5000 }).catch(() => null);
@@ -578,6 +591,20 @@ async function navigateToCourse(page, context, courseCode, jobId) {
   }
 
   await dismissDashboardModal(page, jobId);
+
+  // Remove any lingering backdrop or #pendingRegModal that portal JS may have re-fired
+  // after dismissDashboardModal returned — these intercept the My Courses click.
+  await page.evaluate(() => {
+    for (const el of document.querySelectorAll('.modal.show, .modal.fade.show, [aria-modal="true"]')) {
+      el.classList.remove('show', 'in');
+      el.setAttribute('aria-hidden', 'true');
+      el.style.display = 'none';
+    }
+    document.querySelectorAll('.modal-backdrop').forEach(b => b.remove());
+    document.body.classList.remove('modal-open');
+    document.body.style.removeProperty('overflow');
+    document.body.style.removeProperty('padding-right');
+  }).catch(() => null);
 
   await page.locator(MY_COURSES_LINK).first().click({ timeout: 8000 });
 
