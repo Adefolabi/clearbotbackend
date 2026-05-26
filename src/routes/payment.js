@@ -35,11 +35,29 @@ const initLimiter = rateLimit({
   message: { error: 'Too many requests — please wait 15 minutes and try again.' },
 });
 
+// Already-paid bypass — runs BEFORE the rate limiter so users who retried payment
+// multiple times and hit the limit can still proceed without being blocked.
+async function bypassIfAlreadyPaid(req, res, next) {
+  const { matricNumber } = req.body;
+  if (matricNumber && typeof matricNumber === 'string') {
+    const matric   = matricNumber.trim().toUpperCase();
+    const semester = getCurrentSemester();
+    try {
+      const paidRun = await Run.findOne({ matricNumber: matric, semester, paid: true });
+      if (paidRun) {
+        logger.info('Payment initiate: already paid, bypassing rate limiter', { matric, semester });
+        return res.status(200).json({ alreadyPaid: true });
+      }
+    } catch (_) { /* DB error — fall through to normal flow */ }
+  }
+  next();
+}
+
 // ─── POST /api/payment/initiate ───────────────────────────────────────────────
 // Creates a Run record and initialises a Paystack transaction.
 // Returns { reference, email, amount } for the frontend inline popup.
 
-router.post('/initiate', initLimiter, async (req, res) => {
+router.post('/initiate', bypassIfAlreadyPaid, initLimiter, async (req, res) => {
   const { matricNumber, email: providedEmail } = req.body;
 
   if (!matricNumber || typeof matricNumber !== 'string') {
@@ -51,13 +69,6 @@ router.post('/initiate', initLimiter, async (req, res) => {
   const email    = providedEmail?.trim() || matricToEmail(matric);
 
   try {
-    // If the student already paid this semester (whether or not a run completed),
-    // skip Paystack — payment is per-semester, not per-run.
-    const paidRun = await Run.findOne({ matricNumber: matric, semester, paid: true });
-    if (paidRun) {
-      logger.info('Payment initiate: already paid, skipping Paystack', { matric, semester });
-      return res.status(200).json({ alreadyPaid: true });
-    }
 
     // Idempotency: if there's already an unpaid run for this semester, reuse it.
     // This handles the case where the student clicks "Continue to Payment" twice.
