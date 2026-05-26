@@ -146,23 +146,40 @@ router.get('/status/:reference', async (req, res) => {
     }
 
     // Paystack confirmed — mark the Run as paid.
-    const run = await Run.findOneAndUpdate(
+    let run = await Run.findOneAndUpdate(
       { paystackRef: reference },
       { paid: true, paidAt: new Date() },
       { new: true }
     );
 
     if (!run) {
-      // Paystack says paid but we have no matching record — log and accept.
-      logger.warn('Paystack paid but no matching Run found', { reference });
-      return res.status(200).json({ paid: true, runCompleted: false });
+      // paystackRef was overwritten by a re-initiation (user retried payment).
+      // Fall back to the matric/semester stored in Paystack's transaction metadata.
+      const metaMatric   = psData.data?.metadata?.matricNumber;
+      const metaSemester = psData.data?.metadata?.semester;
+      if (metaMatric && metaSemester) {
+        run = await Run.findOneAndUpdate(
+          { matricNumber: metaMatric, semester: metaSemester, paid: false },
+          { paid: true, paidAt: new Date(), paystackRef: reference },
+          { new: true }
+        );
+        if (run) {
+          logger.info('Payment verified via metadata fallback', {
+            matric: run.matricNumber, semester: run.semester, reference,
+          });
+        }
+      }
+      if (!run) {
+        logger.warn('Paystack paid but no matching Run found', { reference });
+        return res.status(200).json({ paid: true, runCompleted: false });
+      }
+    } else {
+      logger.info('Payment verified and Run marked paid', {
+        matric:   run.matricNumber,
+        semester: run.semester,
+        reference,
+      });
     }
-
-    logger.info('Payment verified and Run marked paid', {
-      matric:   run.matricNumber,
-      semester: run.semester,
-      reference,
-    });
 
     return res.status(200).json({
       paid:         true,
@@ -216,7 +233,7 @@ router.post('/webhook', async (req, res) => {
   if (event.event === 'charge.success') {
     const reference = event.data?.reference;
     if (reference) {
-      const run = await Run.findOneAndUpdate(
+      let run = await Run.findOneAndUpdate(
         { paystackRef: reference },
         { paid: true, paidAt: new Date() },
         { new: true }
@@ -225,7 +242,28 @@ router.post('/webhook', async (req, res) => {
         return null;
       });
 
-      if (run) {
+      if (!run) {
+        // paystackRef overwritten by re-initiation — fall back to metadata.
+        const metaMatric   = event.data?.metadata?.matricNumber;
+        const metaSemester = event.data?.metadata?.semester;
+        if (metaMatric && metaSemester) {
+          run = await Run.findOneAndUpdate(
+            { matricNumber: metaMatric, semester: metaSemester, paid: false },
+            { paid: true, paidAt: new Date(), paystackRef: reference },
+            { new: true }
+          ).catch(err => {
+            logger.error('Webhook metadata fallback DB update failed', { reference, error: err.message });
+            return null;
+          });
+          if (run) {
+            logger.info('Webhook: payment confirmed via metadata fallback', {
+              matric: run.matricNumber, semester: run.semester, reference,
+            });
+          } else {
+            logger.warn('Webhook: paid but no matching Run found', { reference, metaMatric, metaSemester });
+          }
+        }
+      } else {
         logger.info('Webhook: payment confirmed', {
           matric:   run.matricNumber,
           semester: run.semester,
