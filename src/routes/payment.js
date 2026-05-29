@@ -288,4 +288,78 @@ router.post('/webhook', async (req, res) => {
   return res.status(200).json({ received: true });
 });
 
+// ─── POST /api/payment/recover ────────────────────────────────────────────────
+// Admin endpoint to recover a lost payment where Paystack received money but
+// the DB record was never marked paid (e.g. paystackRef overwritten by re-initiation).
+//
+// Body: { secret, matricNumber, reference? }
+//   secret      — must match ADMIN_SECRET env var
+//   matricNumber — the student's matric number
+//   reference    — optional Paystack reference to verify; if omitted uses the
+//                  reference stored on the most recent Run for that matric
+
+router.post('/recover', async (req, res) => {
+  const { secret, matricNumber, reference: bodyRef } = req.body;
+
+  if (!secret || secret !== process.env.ADMIN_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  if (!matricNumber || typeof matricNumber !== 'string') {
+    return res.status(400).json({ error: 'matricNumber is required' });
+  }
+
+  const matric   = matricNumber.trim().toUpperCase();
+  const semester = getCurrentSemester();
+
+  try {
+    // Already paid — nothing to recover.
+    const alreadyPaid = await Run.findOne({ matricNumber: matric, semester, paid: true });
+    if (alreadyPaid) {
+      logger.info('Admin recover: already paid', { matric, semester });
+      return res.status(200).json({ alreadyPaid: true, message: 'Already marked as paid' });
+    }
+
+    // Find the Run to update.
+    const run = await Run.findOne({ matricNumber: matric, semester }).sort({ createdAt: -1 });
+    if (!run) {
+      return res.status(404).json({ error: 'No Run record found for this matric and semester' });
+    }
+
+    const reference = bodyRef?.trim() || run.paystackRef;
+    if (!reference) {
+      return res.status(400).json({ error: 'No reference available — provide one in the request body' });
+    }
+
+    // Verify with Paystack before marking paid.
+    if (process.env.PAYSTACK_SECRET_KEY) {
+      const psRes  = await fetch(`${PAYSTACK_API}/transaction/verify/${encodeURIComponent(reference)}`, {
+        headers: paystackHeaders(),
+      });
+      const psData = await psRes.json();
+
+      if (!psData.status || psData.data?.status !== 'success') {
+        logger.warn('Admin recover: Paystack did not confirm', { matric, reference, ps: psData.data?.status });
+        return res.status(402).json({
+          error:           'Paystack did not confirm this payment',
+          paystackStatus:  psData.data?.status ?? 'unknown',
+          reference,
+        });
+      }
+    }
+
+    run.paid       = true;
+    run.paidAt     = new Date();
+    run.paystackRef = reference;
+    await run.save();
+
+    logger.info('Admin recover: payment recovered', { matric, semester, reference });
+    return res.status(200).json({ recovered: true, matric, semester, reference });
+
+  } catch (err) {
+    logger.error('Admin recover error', { matric, error: err.message });
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 module.exports = router;
