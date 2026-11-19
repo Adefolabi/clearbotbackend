@@ -26,6 +26,19 @@ test('400 on invalid body, bot never runs', async () => {
   assert.equal(h.bot.calls.length, 0);
 });
 
+test('campus must be one the portal offers (Abuja was removed)', async () => {
+  await paidRun().save();
+  for (const campus of ['Abuja Campus', 'iwo campus', '']) {
+    const r = await h.request('POST', '/api/assessment/start', valid({ campus }));
+    assert.equal(r.status, 400, campus);
+  }
+  for (const campus of ['Iwo Campus', 'Ogbomosho Campus']) {
+    const r = await h.request('POST', '/api/assessment/start', valid({ campus, matricNumber: campus === 'Iwo Campus' ? MATRIC : 'BU22CSC1082' }));
+    assert.notEqual(r.status, 400, campus);
+  }
+  assert.equal(h.bot.calls.length, 1); // only the paid matric launched
+});
+
 test('402 when the student has not paid, no job started, matric not left locked', async () => {
   const r = await h.request('POST', '/api/assessment/start', valid());
   assert.equal(r.status, 402);

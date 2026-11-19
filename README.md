@@ -64,7 +64,7 @@ Queues a new assessment job. Returns immediately with a `jobId` — the actual b
 |---|---|---|---|
 | `matricNumber` | string | yes | Pattern: 2 letters + 2 digits + 3 letters + 4 digits |
 | `password` | string | yes | Min 4 characters |
-| `campus` | string | yes | `"Iwo Campus"` or `"Abuja Campus"` |
+| `campus` | string | yes | `"Iwo Campus"` or `"Ogbomosho Campus"` |
 | `defaultRating` | integer | yes | 0–4 (0=Not available, 1=Poor, 2=Average, 3=Good, 4=Excellent) |
 | `perCourseRatings` | object | no | Override rating per course code |
 

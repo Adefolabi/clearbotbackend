@@ -1,6 +1,6 @@
 'use strict';
 
-const VALID_CAMPUSES = ['Iwo Campus', 'Ogbomosho Campus', 'Abuja Campus'];
+const VALID_CAMPUSES = ['Iwo Campus', 'Ogbomosho Campus'];
 const MATRIC_PATTERN = /^[A-Za-z]{2}\d{2}[A-Za-z]{3}\d{4}$/;
 
 /**
