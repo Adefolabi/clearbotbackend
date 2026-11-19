@@ -27,6 +27,19 @@ npm run dev
 
 ---
 
+## Tests
+
+```bash
+npm test
+```
+
+Uses Node's built-in test runner (no extra dependencies). Mongo, Paystack and the Playwright bot are
+stubbed in `test/helpers.js`, so tests need no database, network or browser. Covered: `/api/assessment/start`
+(validation, payment gate, locking, capacity, failure paths) and `/api/payment/*` (initiate, status,
+webhook signature and amount checks, admin recover).
+
+---
+
 ## API Endpoints
 
 ### `POST /api/assessment/start`
