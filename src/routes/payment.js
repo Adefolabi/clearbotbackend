@@ -6,6 +6,15 @@ const rateLimit  = require('express-rate-limit');
 const { Run, getCurrentSemester } = require('../services/db');
 const logger     = require('../utils/logger');
 
+const MATRIC_PATTERN = /^[A-Za-z]{2}\d{2}[A-Za-z]{3}\d{4}$/;
+const EMAIL_PATTERN  = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function safeEqual(a, b) {
+  const ha = crypto.createHash('sha256').update(String(a)).digest();
+  const hb = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
 const router = express.Router();
 
 const PAYSTACK_API = 'https://api.paystack.co';
@@ -60,13 +69,18 @@ async function bypassIfAlreadyPaid(req, res, next) {
 router.post('/initiate', bypassIfAlreadyPaid, initLimiter, async (req, res) => {
   const { matricNumber, email: providedEmail } = req.body;
 
-  if (!matricNumber || typeof matricNumber !== 'string') {
-    return res.status(400).json({ error: 'matricNumber is required' });
+  if (!matricNumber || typeof matricNumber !== 'string' || !MATRIC_PATTERN.test(matricNumber.trim())) {
+    return res.status(400).json({ error: 'A valid matricNumber is required' });
+  }
+  if (providedEmail !== undefined && providedEmail !== null &&
+      (typeof providedEmail !== 'string' || providedEmail.length > 254)) {
+    return res.status(400).json({ error: 'email must be a string' });
   }
 
   const matric   = matricNumber.trim().toUpperCase();
   const semester = getCurrentSemester();
-  const email    = providedEmail?.trim() || matricToEmail(matric);
+  const trimmedEmail = typeof providedEmail === 'string' ? providedEmail.trim() : '';
+  const email    = EMAIL_PATTERN.test(trimmedEmail) ? trimmedEmail : matricToEmail(matric);
 
   try {
 
@@ -243,7 +257,9 @@ router.post('/webhook', async (req, res) => {
 
   if (event.event === 'charge.success') {
     const reference = event.data?.reference;
-    if (reference) {
+    if (reference && event.data?.amount !== AMOUNT_KOBO) {
+      logger.warn('Webhook: amount mismatch — ignoring', { reference, got: event.data?.amount });
+    } else if (reference) {
       let run = await Run.findOneAndUpdate(
         { paystackRef: reference },
         { paid: true, paidAt: new Date() },
@@ -298,11 +314,22 @@ router.post('/webhook', async (req, res) => {
 //   reference    — optional Paystack reference to verify; if omitted uses the
 //                  reference stored on the most recent Run for that matric
 
-router.post('/recover', async (req, res) => {
+const recoverLimiter = rateLimit({
+  windowMs:        15 * 60 * 1000,
+  max:             10,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  message: { error: 'Too many requests' },
+});
+
+router.post('/recover', recoverLimiter, async (req, res) => {
   const { secret, matricNumber, reference: bodyRef } = req.body;
 
-  if (!secret || secret !== process.env.ADMIN_SECRET) {
+  if (!process.env.ADMIN_SECRET || typeof secret !== 'string' || !safeEqual(secret, process.env.ADMIN_SECRET)) {
     return res.status(401).json({ error: 'Unauthorized' });
+  }
+  if (!process.env.PAYSTACK_SECRET_KEY) {
+    return res.status(503).json({ error: 'PAYSTACK_SECRET_KEY not configured — cannot verify payment' });
   }
 
   if (!matricNumber || typeof matricNumber !== 'string') {
@@ -326,19 +353,19 @@ router.post('/recover', async (req, res) => {
       return res.status(404).json({ error: 'No Run record found for this matric and semester' });
     }
 
-    const reference = bodyRef?.trim() || run.paystackRef;
+    const reference = (typeof bodyRef === 'string' && bodyRef.trim()) || run.paystackRef;
     if (!reference) {
       return res.status(400).json({ error: 'No reference available — provide one in the request body' });
     }
 
     // Verify with Paystack before marking paid.
-    if (process.env.PAYSTACK_SECRET_KEY) {
+    {
       const psRes  = await fetch(`${PAYSTACK_API}/transaction/verify/${encodeURIComponent(reference)}`, {
         headers: paystackHeaders(),
       });
       const psData = await psRes.json();
 
-      if (!psData.status || psData.data?.status !== 'success') {
+      if (!psData.status || psData.data?.status !== 'success' || psData.data?.amount !== AMOUNT_KOBO) {
         logger.warn('Admin recover: Paystack did not confirm', { matric, reference, ps: psData.data?.status });
         return res.status(402).json({
           error:           'Paystack did not confirm this payment',

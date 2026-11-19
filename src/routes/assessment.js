@@ -42,8 +42,6 @@ router.post('/start', startRateLimiter, async (req, res) => {
   const dryRun = req.body.dryRun === true;
 
   // ── Measure 6: Per-matric concurrency check ───────────────────────────────
-  // Reject the request immediately if a bot job is already running for this matric.
-  // This prevents race conditions on the portal and protects against double-submits.
   if (jobManager.isMatricActive(matricNumber)) {
     return res.status(409).json({
       error: 'A job is already running for this matric number. Open your progress tab to check it.',
@@ -51,67 +49,75 @@ router.post('/start', startRateLimiter, async (req, res) => {
   }
 
   // ── Global capacity check ──────────────────────────────────────────────────
-  // Prevent server memory exhaustion — each Playwright browser uses ~200–400 MB.
   if (jobManager.getRunningJobCount() >= jobManager.MAX_CONCURRENT_JOBS) {
     return res.status(503).json({
       error: 'Server is at capacity — please try again in a few minutes.',
     });
   }
 
-  // ── Generate job ID ─────────────────────────────────────────────────────
-  const jobId = crypto.randomUUID();
-  jobManager.createJob(jobId, { dryRun }); // Measure 9: dryRun stored in job record
-
-  // ── Measure 6: Lock matric before launching the bot ───────────────────────
-  // Lock is acquired here (in the route handler) rather than inside runAssessmentBot
-  // to close the race window between validation and the first async operation.
+  // Lock synchronously (before any await) to close the double-submit race.
   jobManager.lockMatric(matricNumber);
+  let jobId = null;
+  let botStarted = false;
 
-  // ── Payment verification ────────────────────────────────────────────────
-  // Skipped when PAYSTACK_SECRET_KEY is not set (dev/testing mode).
-  // In production, set PAYSTACK_SECRET_KEY on Fly.io to enforce payment.
-  if (process.env.PAYSTACK_SECRET_KEY) {
-    const semester = getCurrentSemester();
-    const paymentRecord = await Run.findOne({
-      matricNumber: matricNumber.toUpperCase(),
-      semester,
-      paid:         true,
-    });
-
-    if (!paymentRecord) {
-      jobManager.unlockMatric(matricNumber);
-      jobManager.setJobStatus(jobId, 'error');
-      return res.status(402).json({ error: 'Payment required' });
+  try {
+    // ── Payment verification (runs BEFORE a job record exists) ──────────────
+    // Fail closed: in production a missing PAYSTACK_SECRET_KEY must never mean "free".
+    // Dev/test (non-production) may skip payment when the key is unset.
+    if (!process.env.PAYSTACK_SECRET_KEY && process.env.NODE_ENV === 'production') {
+      logger.error('PAYSTACK_SECRET_KEY missing in production — refusing to start job');
+      return res.status(503).json({ error: 'Service temporarily unavailable' });
     }
 
-    paymentRecord.jobId = jobId;
-    await paymentRecord.save();
-  }
-  // ── End payment verification ────────────────────────────────────────────
+    let paymentRecord = null;
+    if (process.env.PAYSTACK_SECRET_KEY) {
+      paymentRecord = await Run.findOne({
+        matricNumber: matricNumber.toUpperCase(),
+        semester:     getCurrentSemester(),
+        paid:         true,
+      });
+      if (!paymentRecord) {
+        return res.status(402).json({ error: 'Payment required' });
+      }
+    }
 
-  // ── Start bot in background ─────────────────────────────────────────────
-  // We do NOT await — the bot runs asynchronously and pushes progress via SSE.
-  const credentials = { matricNumber, password, campus };
-  const ratings     = { defaultRating, perCourseRatings };
+    // ── Create job ──────────────────────────────────────────────────────────
+    jobId = crypto.randomUUID();
+    jobManager.createJob(jobId, { dryRun });
 
-  // dryRun is the 4th parameter (Measure 9).
-  runAssessmentBot(jobId, credentials, ratings, dryRun).catch(err => {
-    // This catch only fires if an error escapes runAssessmentBot's own try/catch,
-    // which should never happen — but belt-and-suspenders.
-    logger.error('Unhandled bot error escaped runAssessmentBot', { jobId, error: err.message });
-    jobManager.emit(jobId, {
-      type:      'error',
-      message:   'An unexpected server error occurred.',
-      fatal:     true,
-      timestamp: new Date().toISOString(),
+    if (paymentRecord) {
+      paymentRecord.jobId = jobId;
+      await paymentRecord.save();
+    }
+
+    // ── Start bot in background (not awaited) ───────────────────────────────
+    const credentials = { matricNumber, password, campus };
+    const ratings     = { defaultRating, perCourseRatings };
+
+    botStarted = true; // bot's own finally block now owns the matric lock
+    runAssessmentBot(jobId, credentials, ratings, dryRun).catch(err => {
+      logger.error('Unhandled bot error escaped runAssessmentBot', { jobId, error: err.message });
+      jobManager.emit(jobId, {
+        type:      'error',
+        message:   'An unexpected server error occurred.',
+        fatal:     true,
+        timestamp: new Date().toISOString(),
+      });
+      jobManager.setJobStatus(jobId, 'error');
+      jobManager.unlockMatric(matricNumber);
     });
-    jobManager.setJobStatus(jobId, 'error');
-    jobManager.unlockMatric(matricNumber); // release lock — bot will not call finally
-  });
 
-  logger.info('Assessment job queued', { jobId, matric: logger.maskMatric(matricNumber), dryRun });
+    logger.info('Assessment job queued', { jobId, matric: logger.maskMatric(matricNumber), dryRun });
+    return res.status(200).json({ jobId });
 
-  return res.status(200).json({ jobId });
+  } catch (err) {
+    logger.error('Assessment start failed', { jobId, error: err.message });
+    if (jobId) jobManager.setJobStatus(jobId, 'error');
+    if (!res.headersSent) res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    // Release the lock on every path where the bot never took ownership of it.
+    if (!botStarted) jobManager.unlockMatric(matricNumber);
+  }
 });
 
 // ─── GET /api/assessment/progress/:jobId  (SSE) ───────────────────────────────

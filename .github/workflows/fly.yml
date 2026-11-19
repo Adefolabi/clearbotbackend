@@ -1,15 +1,44 @@
-name: Deploy to Fly.io
+name: CI and Deploy
 
 on:
   push:
     branches:
       - main
+  pull_request:
 
 jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Tests stub the browser, so skip the Chromium download.
+      - name: Install dependencies
+        run: npm ci
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+
+      - name: Run tests
+        run: npm test
+
   deploy:
     name: Deploy App to Fly.io
+    # Only deploy pushes to main, and only after tests pass.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
     runs-on: ubuntu-latest
-    permissions: write-all
+    permissions:
+      contents: read
     concurrency: deploy-group
     steps:
       - name: Checkout Code
@@ -18,23 +47,7 @@ jobs:
       - name: Set up Fly.io CLI
         uses: superfly/flyctl-actions/setup-flyctl@master
 
-      - name: Create Fly App if not exists
-        run: |
-          flyctl apps create clearbotbackend-adefolabi > create-log.txt 2>&1 || true
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-
       - name: Deploy to Fly.io
-        run: |
-          flyctl deploy --remote-only > deploy-log.txt 2>&1
+        run: flyctl deploy --remote-only
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-
-      - name: Upload Logs on Failure
-        if: failure()
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add create-log.txt deploy-log.txt || true
-          git commit -m "chore: save deploy error logs [skip ci]" || true
-          git push origin main || true

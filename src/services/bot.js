@@ -22,6 +22,21 @@ function isAllowedUrl(url) {
   }
 }
 
+// If the login form's submit handler hasn't attached yet when it's clicked, the
+// browser can fall back to a plain default form submission, which — unlike the
+// portal's own JS-driven POST — puts every field (matric number AND password) in
+// the URL as a plain GET query string. page.url() must never be logged verbatim
+// anywhere in this file; always pass it through here first, which keeps only the
+// origin and path and drops the query string and fragment entirely.
+function safeUrl(url) {
+  try {
+    const u = new URL(url);
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return '[unparseable url]';
+  }
+}
+
 // ─── Emit helpers ─────────────────────────────────────────────────────────────
 
 function log(jobId, message, extra = {}) {
@@ -56,11 +71,11 @@ function randomDelay(type) {
 // ─── Page assertions ──────────────────────────────────────────────────────────
 
 async function assertIsAssessmentPage(page) {
-  const url = page.url();
+  const url = page.url(); // raw — only used for the hostname check below, never logged
   if (!isAllowedUrl(url)) {
     throw new Error(
       `assertIsAssessmentPage: bot is on an unauthorized domain. ` +
-      `URL: "${url}". Refusing to fill any form on this page.`
+      `URL: "${safeUrl(url)}". Refusing to fill any form on this page.`
     );
   }
   const hasRadios = await page.$('input[type="radio"]').then(el => !!el).catch(() => false);
@@ -68,16 +83,16 @@ async function assertIsAssessmentPage(page) {
     const title = await page.title().catch(() => '');
     throw new Error(
       `assertIsAssessmentPage: no radio inputs found on this page. ` +
-      `Title: "${title}", URL: "${url}". Refusing to proceed.`
+      `Title: "${title}", URL: "${safeUrl(url)}". Refusing to proceed.`
     );
   }
 }
 
 async function assertIsCourseAssessmentPage(page) {
-  const url = page.url();
+  const url = page.url(); // raw — only used for the hostname check below, never logged
   if (!isAllowedUrl(url)) {
     throw new Error(
-      `assertIsCourseAssessmentPage: bot is on an unauthorized domain. URL: "${url}".`
+      `assertIsCourseAssessmentPage: bot is on an unauthorized domain. URL: "${safeUrl(url)}".`
     );
   }
   const hasRows = await page.$(
@@ -157,7 +172,7 @@ async function selectCampus(page, campus, jobId) {
 
   throw new Error(
     `Could not locate campus dropdown for "${campus}" with any of the 4 selector strategies. ` +
-    'Run diagnose-form.js and inspect the form output for a precise fix.'
+    'Run scripts/diagnose-form.js and inspect the form output for a precise fix.'
   );
 }
 
@@ -310,7 +325,7 @@ async function handleLogin(page, credentials, jobId) {
   if (outcome === 'timeout' || outcome === null) {
     const stillOnLoginPage = await page.$('input[type="password"]').then(el => !!el).catch(() => false);
     if (stillOnLoginPage) {
-      const pageUrl  = page.url();
+      const pageUrl  = safeUrl(page.url());
       const bodyText = await page.evaluate(() => document.body.innerText.slice(0, 300)).catch(() => '');
       logger.warn('Login form visible after 60s', { jobId, matric: jobMatrics.get(jobId),url: pageUrl, body: bodyText });
       return {
@@ -332,7 +347,7 @@ async function handleLogin(page, credentials, jobId) {
       return { result: 'success' };
     }
 
-    const pageUrl = page.url();
+    const pageUrl = safeUrl(page.url());
     logger.warn('Login timed out after 60s', { jobId, matric: jobMatrics.get(jobId),url: pageUrl });
 
     if (pageUrl.includes('index.php')) {
@@ -360,7 +375,7 @@ async function handleLogin(page, credentials, jobId) {
 
   // Credentials accepted — determine which page the portal landed us on.
   // Do NOT navigate via page.goto() — that breaks the PHP session.
-  const currentUrl = page.url();
+  const currentUrl = safeUrl(page.url());
   if (currentUrl.includes('index.php')) {
     // The portal uses a 3-step login flow:
     //   1. Navigate → click "Student Login" → fill credentials → submit
@@ -392,7 +407,7 @@ async function handleLogin(page, credentials, jobId) {
       log(jobId, '🖱️  Entering student portal…', { status: 'info' });
       await studentEntryEl.click({ force: true });
       await page.waitForSelector('a:has-text("My Courses")', { timeout: 30000 }).catch(() => null);
-      logger.info('Student portal entered after role-selection click', { jobId, matric: jobMatrics.get(jobId),url: page.url() });
+      logger.info('Student portal entered after role-selection click', { jobId, matric: jobMatrics.get(jobId),url: safeUrl(page.url()) });
       return { result: 'success' };
     }
 
@@ -503,7 +518,7 @@ async function discoverCourses(page, jobId) {
       await page.locator('a:has-text("My Courses")').first().click({ force: true, timeout: 10000 });
       logger.info('My Courses link clicked (force)', { jobId, matric: jobMatrics.get(jobId) });
     } catch (err) {
-      const currentUrl   = page.url();
+      const currentUrl   = safeUrl(page.url());
       const visibleLinks = await page.$$eval('a', els =>
         els.filter(a => a.offsetParent !== null && a.innerText.trim().length > 0)
            .map(a => a.innerText.trim())
@@ -524,39 +539,63 @@ async function discoverCourses(page, jobId) {
     }
   }
 
+  // Portal redesign (confirmed live 2026-11-19): clicking "My Courses" used to expand
+  // an in-page sidebar accordion of clickable <a>CODE</a> links. It now navigates to a
+  // dedicated page (mycourses.php) that lists registered courses in plain <table> rows
+  // — the course code is table-cell text, not a link. Wait for a matching <td> instead
+  // of a matching <a>.
+  await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => null);
+
+  // No trailing $ — some courses on the live portal render as "EES 401: Strategies for
+  // Enhancing Employability" (code and title combined in one cell, confirmed live
+  // 2026-11-19) rather than "EES 401" alone. Matching only the leading code still
+  // extracts it correctly and does not change what matches a clean "AES 531"-only cell.
+  const COURSE_RE_SRC = '^[A-Z]{2,4}(?:-[A-Z]{2,4})?\\s\\d{3,4}';
+
   await page.waitForFunction(
-    () => {
-      const all = document.querySelectorAll('a');
-      return Array.from(all).some(a => /^[A-Z]{2,4}\s\d{3,4}$/.test(a.innerText.trim()));
+    (reSrc) => {
+      const re = new RegExp(reSrc);
+      return Array.from(document.querySelectorAll('td')).some(td => re.test(td.textContent.trim()));
     },
-    { timeout: 10000 }
-  );
+    COURSE_RE_SRC,
+    { timeout: 15000 }
+  ).catch(() => null); // genuinely-empty registration and layout changes both land here;
+                        // the caller's "No courses found" + the error dump below tell them apart.
 
-  // ── Opt 1: Walk sidebar DOM to tag each course with its semester ──────────────
-  const tagged = await page.evaluate(() => {
-    const results  = [];
-    let currentSem = null;
-    // Matches standard codes ("ECO 304") and BUI-prefixed codes ("BUI-GEL 304", "BUI-ECO 326").
-    const COURSE_RE = /^[A-Z]{2,4}(?:-[A-Z]{2,4})?\s\d{3,4}$/;
+  // ── Opt 1: Walk the page in document order to tag each course with its semester ──
+  const tagged = await page.evaluate((reSrc) => {
+    const COURSE_RE = new RegExp(reSrc);
+    const results   = [];
+    let currentSem  = null;
 
-    const container =
-      document.querySelector('.collapse.show')                       ||
-      document.querySelector('[class*="collapse"][class*="show"]')   ||
-      document.querySelector('#collapseTwo')                         ||
-      document;
+    const SEM_RE = {
+      first:  /first\s*semester|1.?st\s*semester/i,
+      second: /second\s*semester|2.?nd\s*semester/i,
+      summer: /summer\s*semester|summer\s*session/i,
+    };
 
-    for (const el of container.querySelectorAll('h6, [class*="header"], a')) {
+    // Headings ("First Semester Registered Courses") and <tr> rows are siblings under
+    // the new layout, not nested — querySelectorAll still returns both in document
+    // order, so a heading's semester still applies to every row that follows it.
+    for (const el of document.body.querySelectorAll('h1, h2, h3, h4, h5, h6, [class*="header"], tr')) {
       const text = (el.textContent || '').trim().replace(/\s+/g, ' ');
-      if (/1.?st\s*semester/i.test(text)) {
-        currentSem = '1st';
-      } else if (/2.?nd\s*semester/i.test(text)) {
-        currentSem = '2nd';
-      } else if (el.tagName === 'A' && COURSE_RE.test(text)) {
-        results.push({ code: text, semester: currentSem });
+      if (SEM_RE.first.test(text))  { currentSem = '1st';    continue; }
+      if (SEM_RE.second.test(text)) { currentSem = '2nd';    continue; }
+      if (SEM_RE.summer.test(text)) { currentSem = 'summer'; continue; }
+
+      if (el.tagName === 'TR') {
+        for (const cell of el.querySelectorAll('td')) {
+          const cellText = cell.textContent.trim();
+          const match    = cellText.match(COURSE_RE);
+          if (match) {
+            results.push({ code: match[0], semester: currentSem });
+            break; // one course code per row
+          }
+        }
       }
     }
     return results;
-  });
+  }, COURSE_RE_SRC);
 
   const seen      = new Set();
   const allCourses = tagged.filter(c => {
@@ -607,12 +646,31 @@ async function navigateToCourse(page, context, courseCode, jobId) {
   }).catch(() => null);
 
   await page.locator(MY_COURSES_LINK).first().click({ timeout: 8000 });
+  await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => null);
 
-  const courseLink = page.locator('a').filter({ hasText: new RegExp(`^${courseCode}$`) }).first();
-  await courseLink.waitFor({ state: 'visible', timeout: 8000 });
-  await courseLink.click({ force: true });
+  // Portal redesign (confirmed live 2026-11-19): "My Courses" is now a table of
+  // registered courses (mycourses.php). There is no clickable <a>CODE</a> — find the
+  // <tr> whose text contains this course's code, then click that row's "Open
+  // Materials" action (a plain JS-bound <button>, no href/onclick attribute to read).
+  const courseRow        = page.locator('tr', { hasText: courseCode }).first();
+  const openMaterialsBtn = courseRow.locator('button:has-text("Open Materials"), a:has-text("Open Materials")').first();
 
-  await page.waitForLoadState('domcontentloaded', { timeout: 15000 });
+  const rowFound = await openMaterialsBtn.waitFor({ state: 'visible', timeout: 8000 })
+    .then(() => true).catch(() => false);
+
+  if (!rowFound) {
+    const currentUrl   = safeUrl(page.url());
+    const visibleRows  = await page.$$eval('tr', els =>
+      els.map(e => e.innerText.replace(/\s+/g, ' ').trim()).filter(Boolean)
+    ).catch(() => []);
+    throw new Error(
+      `Could not find a "My Courses" row with an "Open Materials" action for ${courseCode}. ` +
+      `URL: ${currentUrl}. Visible rows: ${visibleRows.slice(0, 20).join(' | ')}`
+    );
+  }
+
+  await openMaterialsBtn.click({ timeout: 8000 });
+  await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => null);
 
   const pageBodySnippet = await page.evaluate(
     () => document.body?.innerText?.slice(0, 300) ?? ''
@@ -620,13 +678,18 @@ async function navigateToCourse(page, context, courseCode, jobId) {
   if (/cloudflare/i.test(pageBodySnippet)) {
     await page.goto(PORTAL_URL, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => null);
     throw new Error(
-      `Cloudflare blocked the course page for ${courseCode}. ` +
+      `Cloudflare blocked the course materials page for ${courseCode}. ` +
       'The portal may require a CAPTCHA or the IP is rate-limited. ' +
       'Try again in a few minutes.'
     );
   }
 
+  // The course's materials page (coursematerials2.php) has an "Assessment" tab/link
+  // (confirmed live: id="pills-assessment-tab", href="assessment.php") leading to the
+  // per-item "Assess" table this function has always returned.
   const ASSESSMENT_TAB_CANDIDATES = [
+    '#pills-assessment-tab',
+    '.nav-pills a:has-text("Assessment")',
     '.nav-tabs a:has-text("Assessment")',
     '[role="tab"]:has-text("Assessment")',
     '.nav a:has-text("Assessment")',
@@ -645,7 +708,7 @@ async function navigateToCourse(page, context, courseCode, jobId) {
   }
 
   if (!assessmentSel) {
-    const visibleLinks = await page.$$eval('a', els =>
+    const visibleLinks = await page.$$eval('a, button', els =>
       els.filter(a => a.offsetParent !== null).map(a => a.innerText.trim()).filter(Boolean)
     );
     throw new Error(
@@ -654,9 +717,13 @@ async function navigateToCourse(page, context, courseCode, jobId) {
     );
   }
 
+  const ASSESS_ROW_SELECTOR = 'td button:has-text("Assess"), td a:has-text("Assess"), td:has-text("Assessed")';
+  const assessmentTab       = page.locator(assessmentSel).first();
+  const assessmentHref      = await assessmentTab.getAttribute('href').catch(() => null);
+
   const [newTabPage] = await Promise.all([
     context.waitForEvent('page', { timeout: 12000 }).catch(() => null),
-    page.click(assessmentSel),
+    assessmentTab.click({ timeout: 8000 }).catch(() => null),
   ]);
 
   logger.info('Assessment link clicked', { jobId, matric: jobMatrics.get(jobId),courseCode, selector: assessmentSel });
@@ -667,18 +734,27 @@ async function navigateToCourse(page, context, courseCode, jobId) {
   if (newTabPage) {
     assessmentPage = newTabPage;
     isNewTab = true;
-    logger.info('Assessment list opened in new tab', { jobId, matric: jobMatrics.get(jobId),courseCode, url: assessmentPage.url() });
-    await assessmentPage.waitForSelector(
-      'td button:has-text("Assess"), td a:has-text("Assess"), td:has-text("Assessed")',
-      { timeout: 35000 }
-    );
+    logger.info('Assessment list opened in new tab', { jobId, matric: jobMatrics.get(jobId),courseCode, url: safeUrl(assessmentPage.url()) });
+    await assessmentPage.waitForSelector(ASSESS_ROW_SELECTOR, { timeout: 35000 });
   } else {
-    logger.info('No new tab from Assessment link — using current page', { jobId, matric: jobMatrics.get(jobId),courseCode });
     assessmentPage = page;
-    await assessmentPage.waitForSelector(
-      'td button:has-text("Assess"), td a:has-text("Assess"), td:has-text("Assessed")',
-      { timeout: 20000 }
-    ).catch(() => null);
+    const landedOnAssessRows = await assessmentPage.waitForSelector(ASSESS_ROW_SELECTOR, { timeout: 8000 })
+      .then(() => true).catch(() => false);
+
+    if (!landedOnAssessRows && assessmentHref) {
+      // Confirmed live: Bootstrap "pills" tabs here don't reliably swap content in
+      // place on a plain click. Follow the tab's own href directly instead — the
+      // right course's assessment context carries over via the portal's server-side
+      // session (set when its materials page was opened), no URL parameter needed.
+      logger.info('Assessment tab click did not reveal Assess rows — following its href', {
+        jobId, matric: jobMatrics.get(jobId), courseCode, href: assessmentHref,
+      });
+      const absoluteUrl = new URL(assessmentHref, page.url()).toString();
+      await page.goto(absoluteUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      await assessmentPage.waitForSelector(ASSESS_ROW_SELECTOR, { timeout: 20000 }).catch(() => null);
+    } else {
+      logger.info('No new tab from Assessment link — using current page', { jobId, matric: jobMatrics.get(jobId),courseCode });
+    }
   }
 
   return { assessmentPage, isNewTab };
@@ -744,11 +820,11 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
     const setupUrlWhitelist = (pg) => {
       pg.on('framenavigated', async (frame) => {
         if (frame.parentFrame() !== null) return;
-        const url = frame.url();
+        const url = frame.url(); // raw — only used for the hostname check below, never logged
         if (isAllowedUrl(url)) return;
-        logger.error('URL whitelist violation — killing job immediately', { jobId, matric: jobMatrics.get(jobId),url });
+        logger.error('URL whitelist violation — killing job immediately', { jobId, matric: jobMatrics.get(jobId), url: safeUrl(url) });
         fatalError(jobId,
-          `❌ Security: bot navigated to an unauthorized domain and was stopped. URL: ${url}`
+          `❌ Security: bot navigated to an unauthorized domain and was stopped. URL: ${safeUrl(url)}`
         );
         jobManager.setJobStatus(jobId, 'error');
         if (browser) await browser.close().catch(() => null);
@@ -806,7 +882,7 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
       ).catch(() => []);
       fatalError(jobId,
         `❌ Portal served parent dashboard after login. ` +
-        `URL: ${page.url()}. ` +
+        `URL: ${safeUrl(page.url())}. ` +
         `Visible links: ${visibleLinks.slice(0, 15).join(' | ')}. ` +
         `Check server logs for "Login POST data sent to portal" and "Role-selection page at index.php" ` +
         `to trace the login flow. The portal uses a 3-step login — see handleLogin comments.`
@@ -901,7 +977,7 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
           log(jobId, `⏭️  ${course.code} — already assessed, skipping`, {
             status: 'skipped', courseCode: course.code,
             assessedRowCount: assessedCount,
-            pageUrl: assessmentPage.url(),
+            pageUrl: safeUrl(assessmentPage.url()),
           });
           skipped++;
           consecutiveFails = 0;
