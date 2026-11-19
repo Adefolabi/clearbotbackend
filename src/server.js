@@ -11,6 +11,14 @@ const paymentRoutes    = require('./routes/payment');
 const healthRoutes     = require('./routes/health');
 const logger     = require('./utils/logger');
 
+// Last-resort guards: a stray async error must be logged, not silently kill every running job.
+process.on('unhandledRejection', (reason) => {
+  logger.error('Unhandled promise rejection', { error: reason?.message || String(reason) });
+});
+process.on('uncaughtException', (err) => {
+  logger.error('Uncaught exception', { error: err.message, stack: err.stack });
+});
+
 const app  = express();
 const PORT = process.env.PORT || 4000;
 
