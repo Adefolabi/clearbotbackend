@@ -76,6 +76,9 @@ app.use((req, res) => {
 // Must have 4 parameters for Express to treat it as an error handler.
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
+  if (typeof err.message === 'string' && err.message.startsWith('CORS:')) {
+    return res.status(403).json({ error: 'Origin not allowed' });
+  }
   logger.error('Unhandled Express error', { error: err.message, stack: err.stack });
   res.status(500).json({ error: 'Internal server error' });
 });

@@ -5,7 +5,7 @@
  * Usage:
  *   node inspect-login.js
  *
- * Output: inspect-output.json in the project root.
+ * Output: inspect-output.json in the current directory.
  * Paste the contents of that file into the selector-debug prompt.
  */
 

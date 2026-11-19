@@ -65,6 +65,8 @@ function createJob(jobId, { dryRun = false } = {}) {
 function setJobStatus(jobId, status) {
   const job = jobs.get(jobId);
   if (!job) return;
+  // 'error' is terminal — a later cleanup 'done' must not mask a failed or timed-out job.
+  if (job.status === 'error' && status === 'done') return;
   job.status = status;
 }
 

@@ -157,7 +157,7 @@ async function selectCampus(page, campus, jobId) {
 
   throw new Error(
     `Could not locate campus dropdown for "${campus}" with any of the 4 selector strategies. ` +
-    'Run diagnose-form.js and inspect the form output for a precise fix.'
+    'Run scripts/diagnose-form.js and inspect the form output for a precise fix.'
   );
 }
 
