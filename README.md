@@ -174,13 +174,43 @@ docker run --env-file .env -p 4000:4000 clearbot-backend
 
 ---
 
+## Deploying to Railway
+
+Railway builds directly from the `Dockerfile` (same image as Fly/Render — Chromium's system
+dependencies come from the base image, no extra install step needed) and already has a
+`railway.json` in this repo configuring the build and health check.
+
+1. Push this repository to GitHub.
+2. In Railway, **New Project → Deploy from GitHub repo** → select this repo.
+   Railway detects `railway.json` and the `Dockerfile` automatically; no build/start command
+   needed.
+3. Set **Variables** (Railway dashboard → your service → Variables tab):
+   - `NODE_ENV` → `production`
+   - `MONGODB_URI` → your Atlas connection string
+   - `FRONTEND_URL` → your deployed frontend URL
+   - `PAYSTACK_SECRET_KEY` → your Paystack secret key (required in production — `/start` refuses
+     requests with a 503 if this is unset while `NODE_ENV=production`)
+   - `ADMIN_SECRET` → a long random string, used by the admin `/api/payment/recover` endpoint
+   - Do **not** set `PORT` — Railway injects its own and the app already reads `process.env.PORT`.
+4. Under **Settings → Networking**, generate a public domain and confirm the health check path
+   shows `/api/health` (already set via `railway.json`).
+5. Pick an instance size with **at least 1 GB RAM** — same reason as the Fly config
+   (`fly.toml`'s `memory = '1gb'` comment): headless Chromium crashes below that.
+6. Railway auto-deploys on every push to the branch you connect — there is no GitHub Action for
+   it in this repo (`.github/workflows/fly.yml` only runs tests and deploys to Fly; it does not
+   need to be removed to also deploy to Railway, but it will keep failing on every push to `main`
+   if Fly's own deploy stays blocked — see the workflow run for why before assuming this repo is
+   broken).
+
+---
+
 ## Environment Variables
 
 | Variable | Required | Description |
 |---|---|---|
-| `PORT` | no | Server port (default: `4000`) |
-| `NODE_ENV` | no | `development` or `production` |
+| `PORT` | no | Server port (default: `4000`). Render/Railway/Fly inject their own — do not set this yourself on those platforms. |
+| `NODE_ENV` | no | `development` or `production`. In `production`, `/start` requires `PAYSTACK_SECRET_KEY` to be set and fails closed (503) otherwise. |
 | `FRONTEND_URL` | yes (prod) | Frontend origin for CORS (e.g. `https://clearbot.vercel.app`) |
 | `MONGODB_URI` | yes | MongoDB Atlas connection string |
-| `PAYSTACK_SECRET_KEY` | Phase 2 | Not active yet |
-| `PAYSTACK_PUBLIC_KEY` | Phase 2 | Not active yet |
+| `PAYSTACK_SECRET_KEY` | yes (prod) | Paystack secret key — gates payment verification on `/start` and `/payment/*` |
+| `ADMIN_SECRET` | yes (to use `/api/payment/recover`) | Shared secret for the admin payment-recovery endpoint. Use a long random value; it is compared with a timing-safe check. |
