@@ -485,6 +485,23 @@ async function dismissDashboardModal(page, jobId) {
   await page.waitForSelector(MODAL_SEL, { state: 'hidden', timeout: 5000 }).catch(() => null);
 }
 
+// Distinguishes "every row already has an Assessed status" from "the assessment page
+// has no rows at all" (e.g. a course with no lecturer connected, where the portal only
+// offers nothing to assess). Both mean "skip", but the user should be told which.
+function describeNoPendingRows(courseCode, assessedCount) {
+  return assessedCount > 0
+    ? `⏭️  ${courseCode} — already assessed, skipping`
+    : `⏭️  ${courseCode} — Lecturer not assigned (no assessable rows), skipping`;
+}
+
+// Rows on a course's assessment page look like "1. Dr Jane Doe Assess" or
+// "2 Teaching Environment Assessed". Header and empty-state rows have no Assess text.
+function countLecturerRows(rowTexts) {
+  return rowTexts.filter(t =>
+    /\bAssess(ed)?\b/.test(t) && !/teaching environment/i.test(t)
+  ).length;
+}
+
 // ─── Course discovery ─────────────────────────────────────────────────────────
 
 async function discoverCourses(page, jobId) {
@@ -948,6 +965,18 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
 
         await assertIsCourseAssessmentPage(assessmentPage);
 
+        // Courses can have no lecturer connected on SSHUB: the page then lists only the
+        // "Teaching Environment" row. Tell the user instead of letting it look like a
+        // lecturer was assessed.
+        const rowTexts = await assessmentPage.$$eval(
+          'tr', els => els.map(e => e.innerText.replace(/\s+/g, ' ').trim())
+        ).catch(() => []);
+        if (countLecturerRows(rowTexts) === 0) {
+          log(jobId, `ℹ️  ${course.code} — Lecturer not assigned (only Teaching Environment is assessable)`, {
+            status: 'info', courseCode: course.code, notice: 'lecturer_not_assigned',
+          });
+        }
+
         // Exclude .dropdown-item — navigation menus can contain "Assess" links (e.g. Google Forms)
         // that are not actual student row assess buttons and are never visible for clicking.
         const BROAD_ASSESS_SEL = 'button:has-text("Assess"):not(.dropdown-item), a:has-text("Assess"):not(.dropdown-item)';
@@ -974,7 +1003,7 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
 
         if (!hasPending) {
           const assessedCount = await assessmentPage.locator('td:has-text("Assessed")').count();
-          log(jobId, `⏭️  ${course.code} — already assessed, skipping`, {
+          log(jobId, describeNoPendingRows(course.code, assessedCount), {
             status: 'skipped', courseCode: course.code,
             assessedRowCount: assessedCount,
             pageUrl: safeUrl(assessmentPage.url()),
@@ -1346,4 +1375,4 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
   }
 }
 
-module.exports = { runAssessmentBot };
+module.exports = { runAssessmentBot, describeNoPendingRows, countLecturerRows };
