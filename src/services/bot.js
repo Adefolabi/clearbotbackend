@@ -973,7 +973,7 @@ async function runAssessmentBot(jobId, credentials, ratings, dryRun = false) {
         ).catch(() => []);
         if (countLecturerRows(rowTexts) === 0) {
           log(jobId, `ℹ️  ${course.code} — Lecturer not assigned (only Teaching Environment is assessable)`, {
-            status: 'info', courseCode: course.code,
+            status: 'info', courseCode: course.code, notice: 'lecturer_not_assigned',
           });
         }
 
