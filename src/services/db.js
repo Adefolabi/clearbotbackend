@@ -27,7 +27,7 @@ async function connectDB() {
 
 const runSchema = new mongoose.Schema({
   matricNumber:  { type: String, required: true, uppercase: true, trim: true },
-  semester:      { type: String, required: true },   // e.g. "2025_2026_2nd"
+  semester:      { type: String, required: true },   // e.g. "2026_2027_1st"
   paid:          { type: Boolean, default: false },
   paidAt:        { type: Date },
   paystackRef:   { type: String },                   // populated when Paystack is integrated
@@ -49,12 +49,28 @@ const Run = mongoose.model('Run', runSchema);
 
 // ─── Semester Helper ──────────────────────────────────────────────────────────
 
+const SEMESTER_RE = /^\d{4}_\d{4}_(1st|2nd)$/;
+
 /**
- * Returns the current semester identifier string, e.g. "2025_2026_2nd".
+ * Returns the current semester identifier string, e.g. "2026_2027_1st".
+ *
+ * If CURRENT_SEMESTER is set it wins, so the rollover is controlled by config rather
+ * than the calendar. A set-but-malformed value throws instead of silently falling back,
+ * because a typo would otherwise reset every student's paid status.
+ *
+ * Otherwise it is derived from today's date:
  * Aug–Jan  = 1st semester of the academic year starting that August.
  * Feb–Jul  = 2nd semester of the same academic year.
  */
 function getCurrentSemester() {
+  const override = process.env.CURRENT_SEMESTER;
+  if (override !== undefined && override !== '') {
+    if (!SEMESTER_RE.test(override)) {
+      throw new Error(`CURRENT_SEMESTER "${override}" is invalid — expected e.g. 2026_2027_1st`);
+    }
+    return override;
+  }
+
   const now = new Date();
   const month = now.getMonth() + 1; // 1-indexed
   const year  = now.getFullYear();
