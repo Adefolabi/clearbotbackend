@@ -9,11 +9,13 @@ const logger     = require('./utils/logger');
 
 const app  = express();
 
-// Trust Fly.io's reverse proxy so Express correctly extracts the real client IP
-// from the X-Forwarded-For header. Value of 1 = trust one proxy hop (Fly's LB only).
-// Eliminates ERR_ERL_UNEXPECTED_X_FORWARDED_FOR from express-rate-limit on every request.
+// Trust the platform's reverse proxy so Express extracts the real client IP from
+// X-Forwarded-For (rate limiting keys on it). TRUST_PROXY_HOPS is how many proxies sit
+// in front of the app (default 1). Too low and every user shares the proxy's IP, so one
+// rate-limit bucket for everyone; too high lets clients spoof their IP.
 // Do NOT use true — that trusts all proxies in the chain, which is a security risk.
-app.set('trust proxy', 1);
+const trustProxyHops = Number.parseInt(process.env.TRUST_PROXY_HOPS ?? '1', 10);
+app.set('trust proxy', Number.isInteger(trustProxyHops) && trustProxyHops >= 0 ? trustProxyHops : 1);
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
 // Wildcard origins cannot be used when credentials are involved (SSE with cookies).

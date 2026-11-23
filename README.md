@@ -176,9 +176,8 @@ docker run --env-file .env -p 4000:4000 clearbot-backend
 
 ## Deploying to Railway
 
-Railway builds directly from the `Dockerfile` (same image as Fly/Render — Chromium's system
-dependencies come from the base image, no extra install step needed) and already has a
-`railway.json` in this repo configuring the build and health check.
+Railway builds directly from the `Dockerfile` (Chromium's system dependencies come from the
+base image, no extra install step) and `railway.json` configures the build and health check.
 
 1. Push this repository to GitHub.
 2. In Railway, **New Project → Deploy from GitHub repo** → select this repo.
@@ -188,19 +187,28 @@ dependencies come from the base image, no extra install step needed) and already
    - `NODE_ENV` → `production`
    - `MONGODB_URI` → your Atlas connection string
    - `FRONTEND_URL` → your deployed frontend URL
-   - `PAYSTACK_SECRET_KEY` → your Paystack secret key (required in production — `/start` refuses
-     requests with a 503 if this is unset while `NODE_ENV=production`)
+   - `PAYSTACK_SECRET_KEY` → your Paystack secret key (required in production — `/start`
+     refuses requests with a 503 if this is unset while `NODE_ENV=production`)
    - `ADMIN_SECRET` → a long random string, used by the admin `/api/payment/recover` endpoint
+   - `CURRENT_SEMESTER` → e.g. `2026_2027_1st`. Change it each semester; see below.
    - Do **not** set `PORT` — Railway injects its own and the app already reads `process.env.PORT`.
 4. Under **Settings → Networking**, generate a public domain and confirm the health check path
    shows `/api/health` (already set via `railway.json`).
-5. Pick an instance size with **at least 1 GB RAM** — same reason as the Fly config
-   (`fly.toml`'s `memory = '1gb'` comment): headless Chromium crashes below that.
-6. Railway auto-deploys on every push to the branch you connect — there is no GitHub Action for
-   it in this repo (`.github/workflows/fly.yml` only runs tests and deploys to Fly; it does not
-   need to be removed to also deploy to Railway, but it will keep failing on every push to `main`
-   if Fly's own deploy stays blocked — see the workflow run for why before assuming this repo is
-   broken).
+5. Pick an instance size with **at least 1 GB RAM**: headless Chromium crashes below that.
+6. Under **Settings → Deploy**, enable **Wait for CI** so a failing run of the GitHub Actions
+   tests (`.github/workflows/ci.yml`) blocks the deploy. Railway auto-deploys on every push to
+   the connected branch; this repo has no deploy workflow of its own.
+7. After the first deploy, check the logs for `Active semester: …`, then hit the API from your
+   frontend and confirm rate limiting works per user. If every user shares one limit, set
+   `TRUST_PROXY_HOPS` to the number of proxies in front of the app (default `1`).
+
+### Changing semester
+
+Payments are tracked per student per semester, so a paid student stays "paid" until the
+semester value changes. At the start of each semester, update `CURRENT_SEMESTER` in Railway
+(format `YYYY_YYYY_1st` or `YYYY_YYYY_2nd`) and redeploy. A malformed value stops the server
+from starting. If the variable is unset, the semester is derived from today's date
+(Aug–Jan = 1st, Feb–Jul = 2nd).
 
 ---
 
@@ -208,7 +216,9 @@ dependencies come from the base image, no extra install step needed) and already
 
 | Variable | Required | Description |
 |---|---|---|
-| `PORT` | no | Server port (default: `4000`). Render/Railway/Fly inject their own — do not set this yourself on those platforms. |
+| `PORT` | no | Server port (default: `4000`). Render/Railway inject their own — do not set this yourself on those platforms. |
+| `CURRENT_SEMESTER` | recommended | Active semester, e.g. `2026_2027_1st`. Falls back to a date-based value if unset. Malformed values stop startup. |
+| `TRUST_PROXY_HOPS` | no | Number of reverse proxies in front of the app (default `1`). Controls how the client IP is read for rate limiting. |
 | `NODE_ENV` | no | `development` or `production`. In `production`, `/start` requires `PAYSTACK_SECRET_KEY` to be set and fails closed (503) otherwise. |
 | `FRONTEND_URL` | yes (prod) | Frontend origin for CORS (e.g. `https://clearbot.vercel.app`) |
 | `MONGODB_URI` | yes | MongoDB Atlas connection string |
