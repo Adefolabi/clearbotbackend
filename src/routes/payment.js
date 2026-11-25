@@ -52,7 +52,7 @@ async function bypassIfAlreadyPaid(req, res, next) {
   if (matricNumber && typeof matricNumber === 'string') {
     const matric   = matricNumber.trim().toUpperCase();
     const semester = getCurrentSemester();
-    if (isFreeMatric(matric)) {
+    if (await isFreeMatric(matric)) {
       logger.info('Payment initiate: free-access matric, skipping payment', { matric });
       return res.status(200).json({ alreadyPaid: true });
     }

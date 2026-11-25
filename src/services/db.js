@@ -47,6 +47,18 @@ runSchema.index({ matricNumber: 1, semester: 1 });
 
 const Run = mongoose.model('Run', runSchema);
 
+// ─── FreeTester Schema ────────────────────────────────────────────────────────
+// Matric numbers allowed to run the bot without paying (owner/testers).
+// Managed at runtime via /api/admin/testers — no redeploy needed to add someone.
+
+const freeTesterSchema = new mongoose.Schema({
+  matricNumber: { type: String, required: true, unique: true, uppercase: true, trim: true },
+  note:         { type: String, trim: true, maxlength: 200 },
+  addedAt:      { type: Date, default: Date.now },
+});
+
+const FreeTester = mongoose.model('FreeTester', freeTesterSchema);
+
 // ─── Semester Helper ──────────────────────────────────────────────────────────
 
 const SEMESTER_RE = /^\d{4}_\d{4}_(1st|2nd)$/;
@@ -87,4 +99,4 @@ function getCurrentSemester() {
   }
 }
 
-module.exports = { connectDB, Run, getCurrentSemester };
+module.exports = { connectDB, Run, FreeTester, getCurrentSemester };

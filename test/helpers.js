@@ -50,6 +50,33 @@ class Run {
 }
 Run.reset();
 
+// ─── In-memory stand-in for the Mongoose FreeTester model ────────────────────
+class FreeTester {
+  constructor(fields = {}) { Object.assign(this, { addedAt: new Date() }, fields); }
+  async save() {
+    if (FreeTester.fail) throw new Error('simulated DB failure');
+    if (!FreeTester.docs.includes(this)) FreeTester.docs.push(this);
+    return this;
+  }
+  static async exists(q) {
+    if (FreeTester.fail) throw new Error('simulated DB failure');
+    return FreeTester.docs.some(d => d.matricNumber === q.matricNumber) ? { _id: 'x' } : null;
+  }
+  static async findOne(q) { return FreeTester.docs.find(d => d.matricNumber === q.matricNumber) || null; }
+  static find() {
+    const docs = FreeTester.docs.map(({ matricNumber, note, addedAt }) => ({ matricNumber, note, addedAt }));
+    const chain = { sort: () => chain, lean: () => Promise.resolve(docs) };
+    return chain;
+  }
+  static async deleteOne(q) {
+    const before = FreeTester.docs.length;
+    FreeTester.docs = FreeTester.docs.filter(d => d.matricNumber !== q.matricNumber);
+    return { deletedCount: before - FreeTester.docs.length };
+  }
+  static reset() { FreeTester.docs = []; FreeTester.fail = false; }
+}
+FreeTester.reset();
+
 // ─── Bot stub ─────────────────────────────────────────────────────────────────
 const bot = { calls: [], hang: false };
 function runAssessmentBot(jobId, credentials, ratings, dryRun) {
@@ -62,7 +89,7 @@ function runAssessmentBot(jobId, credentials, ratings, dryRun) {
 }
 
 stubModule('services/db.js', {
-  connectDB: async () => {}, Run, getCurrentSemester: () => SEMESTER,
+  connectDB: async () => {}, Run, FreeTester, getCurrentSemester: () => SEMESTER,
 });
 stubModule('services/bot.js', { runAssessmentBot });
 
@@ -120,4 +147,4 @@ function withEnv(vars) {
   return () => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } };
 }
 
-module.exports = { Run, bot, paystack, SEMESTER, listen, close, request, sign, withEnv, jobManager: () => require(path.join(SRC, 'services', 'jobManager')) };
+module.exports = { Run, FreeTester, bot, paystack, SEMESTER, listen, close, request, sign, withEnv, jobManager: () => require(path.join(SRC, 'services', 'jobManager')) };

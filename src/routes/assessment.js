@@ -71,7 +71,7 @@ router.post('/start', startRateLimiter, async (req, res) => {
     }
 
     let paymentRecord = null;
-    const freeAccess = isFreeMatric(matricNumber);
+    const freeAccess = await isFreeMatric(matricNumber);
     if (freeAccess) {
       logger.info('Start: free-access matric, skipping payment check', { matric: logger.maskMatric(matricNumber) });
     } else if (process.env.PAYSTACK_SECRET_KEY) {
