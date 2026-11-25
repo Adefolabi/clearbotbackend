@@ -9,8 +9,8 @@ const logger     = require('./utils/logger');
 
 const app  = express();
 
-// Trust Fly.io's reverse proxy so Express correctly extracts the real client IP
-// from the X-Forwarded-For header. Value of 1 = trust one proxy hop (Fly's LB only).
+// Trust the platform's reverse proxy (Railway/Fly edge) so Express correctly extracts the
+// real client IP from X-Forwarded-For. Value of 1 = trust one proxy hop (the platform LB only).
 // Eliminates ERR_ERL_UNEXPECTED_X_FORWARDED_FOR from express-rate-limit on every request.
 // Do NOT use true — that trusts all proxies in the chain, which is a security risk.
 app.set('trust proxy', 1);
