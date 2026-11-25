@@ -2,6 +2,7 @@
 
 require('dotenv').config();
 
+const mongoose = require('mongoose');
 const { connectDB, getCurrentSemester } = require('./services/db');
 const { cleanupOldJobs } = require('./services/jobManager');
 const app        = require('./app');
@@ -29,12 +30,35 @@ async function start() {
     logger.error('Failed to connect to MongoDB on startup', { error: err.message });
   }
 
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     logger.info(`CLEARBOT backend running on port ${PORT}`);
   });
 
   // Sweep stale in-memory jobs every 30 minutes.
-  setInterval(cleanupOldJobs, 30 * 60 * 1000);
+  const sweeper = setInterval(cleanupOldJobs, 30 * 60 * 1000);
+
+  // Railway/Fly send SIGTERM on every redeploy. Stop accepting connections, close the
+  // DB, then exit; force-exit after 10s so open SSE streams can't hang the shutdown.
+  let shuttingDown = false;
+  const shutdown = (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info(`${signal} received — shutting down`);
+    clearInterval(sweeper);
+    setTimeout(() => process.exit(0), 10_000).unref();
+    server.close(async () => {
+      try {
+        await mongoose.connection.close();
+      } catch (err) {
+        logger.error('Error closing MongoDB connection', { error: err.message });
+      }
+      process.exit(0);
+    });
+    // Drop idle keep-alive sockets so server.close() can complete (Node >= 18.2).
+    server.closeIdleConnections?.();
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT',  () => shutdown('SIGINT'));
 }
 
 start();
