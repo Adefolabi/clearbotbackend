@@ -7,6 +7,7 @@ const jobManager = require('../services/jobManager');
 const { runAssessmentBot } = require('../services/bot');
 const { validateStartRequest } = require('../utils/validate');
 const logger     = require('../utils/logger');
+const { isFreeMatric } = require('../utils/freeAccess');
 const { Run, getCurrentSemester } = require('../services/db');
 
 const router = express.Router();
@@ -70,7 +71,10 @@ router.post('/start', startRateLimiter, async (req, res) => {
     }
 
     let paymentRecord = null;
-    if (process.env.PAYSTACK_SECRET_KEY) {
+    const freeAccess = isFreeMatric(matricNumber);
+    if (freeAccess) {
+      logger.info('Start: free-access matric, skipping payment check', { matric: logger.maskMatric(matricNumber) });
+    } else if (process.env.PAYSTACK_SECRET_KEY) {
       paymentRecord = await Run.findOne({
         matricNumber: matricNumber.toUpperCase(),
         semester:     getCurrentSemester(),

@@ -226,3 +226,15 @@ test('recover: already paid, unknown matric, and non-string reference are handle
   const r = await recover({ secret: ADMIN, matricNumber: MATRIC, reference: { x: 1 } });
   assert.equal(r.status, 200); // falls back to stored reference instead of throwing
 });
+
+test('initiate: FREE_MATRICS matric gets alreadyPaid without touching Paystack', async () => {
+  const undo = h.withEnv({ FREE_MATRICS: 'BU22CSC1081' });
+  try {
+    const r = await h.request('POST', '/api/payment/initiate', { matricNumber: MATRIC.toLowerCase() });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.alreadyPaid, true);
+    assert.equal(h.paystack.calls.length, 0);
+  } finally {
+    undo();
+  }
+});
