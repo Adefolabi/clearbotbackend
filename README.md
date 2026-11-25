@@ -246,4 +246,5 @@ not free, so an outage never gives away free runs.
 | `MONGODB_URI` | yes | MongoDB Atlas connection string |
 | `PAYSTACK_SECRET_KEY` | yes (prod) | Paystack secret key — gates payment verification on `/start` and `/payment/*` |
 | `ADMIN_SECRET` | yes (for admin endpoints) | Shared secret for `/api/payment/recover` and `/api/admin/testers`. Use a long random value; it is compared with a timing-safe check. Admin endpoints are disabled when unset. |
+| `PAYMENTS_PAUSED` | no | Set to `true` to make every run free (no Paystack step). Remove it or set `false` to turn payment back on. Keep `PAYSTACK_SECRET_KEY` set either way. |
 | `FREE_MATRICS` | no | Comma-separated matric numbers that skip payment (fallback to the database tester list — see "Free testers"). |

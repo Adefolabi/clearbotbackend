@@ -18,8 +18,14 @@ function envFreeMatrics() {
     .filter(Boolean);
 }
 
+/** PAYMENTS_PAUSED=true makes every run free (e.g. during a launch/testing period). */
+function paymentsPaused() {
+  return String(process.env.PAYMENTS_PAUSED || '').trim().toLowerCase() === 'true';
+}
+
 async function isFreeMatric(matricNumber) {
   if (!matricNumber || typeof matricNumber !== 'string') return false;
+  if (paymentsPaused()) return true;
   const matric = matricNumber.trim().toUpperCase();
   if (envFreeMatrics().includes(matric)) return true;
 
@@ -33,4 +39,4 @@ async function isFreeMatric(matricNumber) {
   }
 }
 
-module.exports = { isFreeMatric, envFreeMatrics };
+module.exports = { isFreeMatric, envFreeMatrics, paymentsPaused };
