@@ -122,6 +122,22 @@ test('dev mode (non-production, no Paystack key) skips the payment check', async
   assert.equal(r.status, 200);
 });
 
+test('FREE_MATRICS: listed matric starts without payment; others still need to pay', async () => {
+  const undo = h.withEnv({ FREE_MATRICS: ' bu22csc1081 , BU21ABC1234' });
+  try {
+    const free = await h.request('POST', '/api/assessment/start', valid());
+    assert.equal(free.status, 200);
+    assert.equal(h.bot.calls.length, 1);
+
+    const other = await h.request('POST', '/api/assessment/start', valid({ matricNumber: 'BU22CSC9999' }));
+    assert.equal(other.status, 402);
+    assert.equal(h.bot.calls.length, 1);
+  } finally {
+    undo();
+  }
+});
+
+// Leaves jobs running (bot.hang) — keep this the last /start test so later tests don't hit capacity.
 test('503 when the server is at capacity', async () => {
   const jm = h.jobManager();
   h.bot.hang = true;

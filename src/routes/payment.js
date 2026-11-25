@@ -5,6 +5,7 @@ const crypto     = require('crypto');
 const rateLimit  = require('express-rate-limit');
 const { Run, getCurrentSemester } = require('../services/db');
 const logger     = require('../utils/logger');
+const { isFreeMatric } = require('../utils/freeAccess');
 
 const MATRIC_PATTERN = /^[A-Za-z]{2}\d{2}[A-Za-z]{3}\d{4}$/;
 const EMAIL_PATTERN  = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -51,6 +52,10 @@ async function bypassIfAlreadyPaid(req, res, next) {
   if (matricNumber && typeof matricNumber === 'string') {
     const matric   = matricNumber.trim().toUpperCase();
     const semester = getCurrentSemester();
+    if (isFreeMatric(matric)) {
+      logger.info('Payment initiate: free-access matric, skipping payment', { matric });
+      return res.status(200).json({ alreadyPaid: true });
+    }
     try {
       const paidRun = await Run.findOne({ matricNumber: matric, semester, paid: true });
       if (paidRun) {
