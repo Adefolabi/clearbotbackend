@@ -76,6 +76,25 @@ test('a DB-listed tester skips payment on /initiate and /start; removing them re
   assert.equal(after.status, 402);
 });
 
+test('PAYMENTS_PAUSED=true lets any valid matric through without Paystack; other values do not', async () => {
+  const body = { matricNumber: 'BU22CSC4321', password: 'secret1', campus: 'Iwo Campus', defaultRating: 3 };
+  for (const off of ['false', '1', '']) {
+    const undo = h.withEnv({ PAYMENTS_PAUSED: off });
+    try {
+      assert.equal((await h.request('POST', '/api/assessment/start', body)).status, 402, off);
+    } finally { undo(); }
+  }
+  const undo = h.withEnv({ PAYMENTS_PAUSED: ' TRUE ' });
+  try {
+    const init = await h.request('POST', '/api/payment/initiate', { matricNumber: 'BU22CSC4321' });
+    assert.equal(init.body.alreadyPaid, true);
+    assert.equal(h.paystack.calls.length, 0);
+    assert.equal((await h.request('POST', '/api/assessment/start', body)).status, 200);
+    // Invalid input is still rejected while paused.
+    assert.equal((await h.request('POST', '/api/assessment/start', { ...body, matricNumber: 'bad' })).status, 400);
+  } finally { undo(); }
+});
+
 test('a DB failure during the tester lookup fails closed (payment still required)', async () => {
   h.FreeTester.fail = true;
   const r = await h.request('POST', '/api/assessment/start',
