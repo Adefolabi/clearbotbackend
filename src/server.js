@@ -3,7 +3,7 @@
 require('dotenv').config();
 
 const mongoose = require('mongoose');
-const { connectDB } = require('./services/db');
+const { connectDB, getCurrentSemester } = require('./services/db');
 const { cleanupOldJobs } = require('./services/jobManager');
 const app        = require('./app');
 const logger     = require('./utils/logger');
@@ -20,6 +20,9 @@ const PORT = process.env.PORT || 4000;
 
 // ─── Startup ──────────────────────────────────────────────────────────────────
 async function start() {
+  // Fail fast on a malformed CURRENT_SEMESTER instead of erroring on the first payment.
+  logger.info(`Active semester: ${getCurrentSemester()}`);
+
   try {
     await connectDB();
   } catch (err) {

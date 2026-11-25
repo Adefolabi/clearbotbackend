@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const h = require('./helpers');
 
 const MATRIC = 'BU22CSC1081';
-const AMOUNT = 100000;
+const AMOUNT = 200000;
 const PS_KEY = 'sk_test_key';
 const ADMIN  = 'admin-secret-value';
 
@@ -42,7 +42,7 @@ test('regression: non-string email returns 400 instead of crashing the process',
   assert.equal(ok.status, 200);
 });
 
-test('initiate: creates a Run and asks Paystack for exactly ₦1,000', async () => {
+test('initiate: creates a Run and asks Paystack for exactly ₦2,000', async () => {
   const r = await h.request('POST', '/api/payment/initiate', { matricNumber: MATRIC.toLowerCase() });
   assert.equal(r.status, 200);
   assert.equal(r.body.amount, AMOUNT);

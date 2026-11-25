@@ -18,7 +18,7 @@ function safeEqual(a, b) {
 const router = express.Router();
 
 const PAYSTACK_API = 'https://api.paystack.co';
-const AMOUNT_KOBO  = 100000; // ₦1,000
+const AMOUNT_KOBO  = 200000; // ₦2,000
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
