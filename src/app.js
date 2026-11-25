@@ -5,7 +5,8 @@ const cors       = require('cors');
 const assessmentRoutes = require('./routes/assessment');
 const paymentRoutes    = require('./routes/payment');
 const healthRoutes     = require('./routes/health');
-const logger     = require('./utils/logger');
+const adminRoutes      = require('./routes/admin');
+const logger    = require('./utils/logger');
 
 const app  = express();
 
@@ -55,6 +56,7 @@ app.use(express.json({ limit: '10kb' }));
 app.use('/api/assessment', assessmentRoutes);
 app.use('/api/payment',    paymentRoutes);
 app.use('/api/health',     healthRoutes);
+app.use('/api/admin',      adminRoutes);
 
 // ─── 404 handler ─────────────────────────────────────────────────────────────
 app.use((req, res) => {

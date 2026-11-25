@@ -210,6 +210,28 @@ semester value changes. At the start of each semester, update `CURRENT_SEMESTER`
 from starting. If the variable is unset, the semester is derived from today's date
 (Aug–Jan = 1st, Feb–Jul = 2nd).
 
+### Free testers
+
+Matric numbers on the free-tester list skip payment: `/api/payment/initiate` returns
+`{ alreadyPaid: true }` (the frontend goes straight to the rating screen) and `/start` skips the
+payment check. Testers are stored in MongoDB, so adding or removing one takes effect immediately,
+with no redeploy. All admin calls need the `X-Admin-Secret` header set to `ADMIN_SECRET`.
+
+```bash
+API=https://<your-backend-domain>
+# add
+curl -X POST "$API/api/admin/testers" -H "X-Admin-Secret: $ADMIN_SECRET" \
+     -H "Content-Type: application/json" -d '{"matricNumber":"BU22CSC1081","note":"owner"}'
+# list
+curl "$API/api/admin/testers" -H "X-Admin-Secret: $ADMIN_SECRET"
+# remove
+curl -X DELETE "$API/api/admin/testers/BU22CSC1081" -H "X-Admin-Secret: $ADMIN_SECRET"
+```
+
+`FREE_MATRICS` (comma-separated env var) also grants free access and works even if the database
+is down. Changing it needs a redeploy. If the database lookup fails, the student is treated as
+not free, so an outage never gives away free runs.
+
 ---
 
 ## Environment Variables
@@ -223,4 +245,5 @@ from starting. If the variable is unset, the semester is derived from today's da
 | `FRONTEND_URL` | yes (prod) | Frontend origin for CORS (e.g. `https://clearbot.vercel.app`) |
 | `MONGODB_URI` | yes | MongoDB Atlas connection string |
 | `PAYSTACK_SECRET_KEY` | yes (prod) | Paystack secret key — gates payment verification on `/start` and `/payment/*` |
-| `ADMIN_SECRET` | yes (to use `/api/payment/recover`) | Shared secret for the admin payment-recovery endpoint. Use a long random value; it is compared with a timing-safe check. |
+| `ADMIN_SECRET` | yes (for admin endpoints) | Shared secret for `/api/payment/recover` and `/api/admin/testers`. Use a long random value; it is compared with a timing-safe check. Admin endpoints are disabled when unset. |
+| `FREE_MATRICS` | no | Comma-separated matric numbers that skip payment (fallback to the database tester list — see "Free testers"). |
